@@ -22,6 +22,9 @@ def parse_intent(objective: str, companies: list[str] | None = None) -> dict:
         intent["notify"] = False
     elif "on-hold" in low or "on hold" in low or "do not close" in low or "stop." in low:
         intent["deal_action"] = "on_hold"
+    elif "resolve" in low:
+        intent["deal_action"] = "resolve"
+        intent["notify"] = False
     elif "closed-won" in low or "close" in low:
         intent["deal_action"] = "close_won"
     else:

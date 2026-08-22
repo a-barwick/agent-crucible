@@ -47,6 +47,30 @@ func TestRunEndpoint(t *testing.T) {
 	}
 }
 
+func TestGenerateCustomTools(t *testing.T) {
+	h := New()
+	payload := []byte(`{"seed":3,"n":3,"tools":[{"name":"search_ticket","required":["query"]},{"name":"update_ticket","required":["id","status"]}]}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(payload))
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("generate %d %s", rec.Code, rec.Body.String())
+	}
+	var drafts []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &drafts); err != nil {
+		t.Fatal(err)
+	}
+	if len(drafts) == 0 {
+		t.Fatal("no drafts")
+	}
+	if drafts[0]["id"] == "close-acme" {
+		t.Fatalf("ticket tools should not emit close-acme: %v", drafts[0])
+	}
+	if drafts[0]["expect"] == nil || drafts[0]["fixtures"] == nil {
+		t.Fatalf("draft missing expect/fixtures: %v", drafts[0])
+	}
+}
+
 func TestIndexServed(t *testing.T) {
 	h := New()
 	rec := httptest.NewRecorder()

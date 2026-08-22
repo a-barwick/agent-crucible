@@ -16,6 +16,12 @@ func TestLibraryHasFive(t *testing.T) {
 	if Get("renew-supplies").Expect.DealID != "deal-supplies-1" {
 		t.Fatal("supplies expect")
 	}
+	if _, ok := Lookup("gen-resolve-primary"); ok {
+		t.Fatal("generated ids are not in the library")
+	}
+	if _, ok := Lookup(""); ok {
+		t.Fatal("empty id is not a hit")
+	}
 }
 
 func TestWorldIsolated(t *testing.T) {

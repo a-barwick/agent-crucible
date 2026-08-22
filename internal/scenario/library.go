@@ -156,15 +156,24 @@ func Library() []Scenario {
 }
 
 func Get(id string) Scenario {
+	if s, ok := Lookup(id); ok {
+		return s
+	}
+	return Library()[0]
+}
+
+// Lookup finds a built-in scenario. Unknown ids are not silently rewritten
+// to close-acme — callers with generated extras must use those instead.
+func Lookup(id string) (Scenario, bool) {
 	if id == "" {
-		id = CloseAcmeID
+		return Scenario{}, false
 	}
 	for _, s := range Library() {
 		if s.ID == id {
-			return s
+			return s, true
 		}
 	}
-	return Library()[0]
+	return Scenario{}, false
 }
 
 func Summaries() []Info {

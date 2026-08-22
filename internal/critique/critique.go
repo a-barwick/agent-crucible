@@ -63,7 +63,7 @@ func Write(in Input) Critique {
 				"When the CRM tool returned a successful response with missing fields (%d trials), the agent recovered %s of the time. The graph treats semantic failure as transport success.",
 				c.N, rate,
 			))
-			fixes = append(fixes, Fix{Node: "write", Advice: "Add validation before the write node. Required fields on get_deal and write_deal must be present or the edge should abort."})
+			fixes = append(fixes, Fix{Node: "write", Advice: "Add validation before the write node. Required fields on the write tool must be present or the edge should abort."})
 		case fault.Timeout:
 			paras = append(paras, fmt.Sprintf(
 				"Timeouts (%d trials) completed %s of the time. lookup/fetch retry once, then abort; a timeout on write skips a consistent notify, leaving the world half-done or claiming a write that never landed.",

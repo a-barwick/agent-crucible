@@ -9,7 +9,7 @@ try:
 except ImportError:  # pragma: no cover
     from langgraph.checkpoint.memory import MemorySaver as InMemorySaver
 
-from . import patient
+from . import generic, patient
 
 
 class AgentState(TypedDict, total=False):
@@ -65,6 +65,9 @@ def build(cb) -> Any:
 
 
 def run(cb, req: dict) -> dict:
+    spec = req.get("spec") or {}
+    if generic.should_compile(spec):
+        return generic.run_langgraph(cb, req)
     graph = build(cb)
     thread = req.get("thread_id") or "t"
     result = graph.invoke(patient.seed(req), {"configurable": {"thread_id": thread}})
