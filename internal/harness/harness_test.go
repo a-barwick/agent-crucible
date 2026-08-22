@@ -222,6 +222,36 @@ func TestSingleFaultMalformed(t *testing.T) {
 	}
 }
 
+// TestArmedCostBudgetIsWhatTheTimelineSays: the budget scales with the tool
+// surface, but the armed event logged the package default, so the timeline for a
+// two-tool agent claimed a ceiling of 3 while the run actually stopped at 1.
+func TestArmedCostBudgetIsWhatTheTimelineSays(t *testing.T) {
+	bundle := ticketBundle(1, 0, false) // two tools -> budget 1
+	s := Run(context.Background(), Config{
+		Seed: 5, Trials: 24, P: 1, Agent: "pasted", Bundle: &bundle,
+		Faults: []fault.Type{fault.CostCeiling},
+	})
+	want := costBudget(2)
+	if want == fault.DefaultCostBudget {
+		t.Fatalf("pick a tool surface whose budget differs from the default, got %d", want)
+	}
+	saw := 0
+	for _, tr := range s.Trials {
+		for _, ev := range tr.Events {
+			if ev.Message != "cost ceiling armed" {
+				continue
+			}
+			saw++
+			if got := ev.Data["budget"]; fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Fatalf("trial %d logged budget %v, armed %v", tr.N, got, want)
+			}
+		}
+	}
+	if saw == 0 {
+		t.Fatal("no cost ceiling was armed at p=1")
+	}
+}
+
 func eventMsgs(tr Trial) []string {
 	out := make([]string, len(tr.Events))
 	for i, ev := range tr.Events {

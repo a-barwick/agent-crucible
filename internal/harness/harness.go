@@ -285,7 +285,8 @@ func runOne(ctx context.Context, cfg Config, n int) Trial {
 	// "Budget trips halfway through" only holds if the budget scales with the
 	// graph. A fixed budget of three never trips on a two-tool agent, which
 	// silently made cost_ceiling unreachable for every drop-in.
-	inj.SetCostBudget(costBudget(len(toolNames(cfg))))
+	budget := costBudget(len(toolNames(cfg)))
+	inj.SetCostBudget(budget)
 	saver := agent.NewMemorySaver()
 
 	st := agent.State{
@@ -313,7 +314,10 @@ func runOne(ctx context.Context, cfg Config, n int) Trial {
 		// Armed, not fired: the budget only becomes a fault once a tool call
 		// actually trips it, which the bus records. Counting the arming here
 		// would attribute a cost-ceiling failure to trials that never hit one.
-		rec.State("cost ceiling armed", map[string]any{"budget": fault.DefaultCostBudget})
+		// The budget actually armed, not the package default: they differ for
+		// every agent whose tool surface is not six, and the timeline is what
+		// someone reads to work out why a run stopped where it did.
+		rec.State("cost ceiling armed", map[string]any{"budget": budget})
 	}
 
 	hook := &nodeHook{inj: inj, alt: scn.AltObjective}
