@@ -153,8 +153,13 @@ def _body_raised(chamber, name: str, before, exc: BaseException) -> None:
     the agent's own crash invisible in the timeline and scored the trial as
     though the tool had worked."""
     from . import httpio
+    from .callback import CallbackError
 
     if before is not None and httpio.hits() > before:
+        raise exc
+    # A failure to reach the chamber is never the agent's verdict, and the
+    # chamber cannot answer in its place either. The JS wrapper already did this.
+    if isinstance(exc, CallbackError):
         raise exc
     if hasattr(chamber, "state"):
         try:

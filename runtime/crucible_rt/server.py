@@ -71,9 +71,15 @@ class Handler(BaseHTTPRequestHandler):
             self._write(200, {"ok": True})
             return
         if self.path == "/v1/meta":
-            # Report what is importable, not what the sidecar wishes were
-            # installed. The Go side reads `adk` to decide whether to offer ADK
-            # agents, and a hardcoded true offered agents that could not run.
+            # Each key answers "can this sidecar serve that?", which is not the
+            # same question as "is the third-party package installed". The Go
+            # side reads them to decide which agents to offer, so a key that
+            # reported the package would hide agents this sidecar can run.
+            #
+            # adk is a capability: adk_closer runs the ADK-shaped loop whether or
+            # not google-adk is importable, and google_adk reports which of the
+            # two is in use. Optional HTTP clients are reported as found, since
+            # an agent written against requests genuinely cannot run without it.
             self._write(200, {
                 "langgraph": _have("langgraph"),
                 "adk": True,
@@ -324,6 +330,7 @@ def main(argv=None):
         print("react-ok", react)
 
         _smoke_wrapper_honesty()
+        _smoke_chamber_error_propagates()
         _smoke_tools_list()
         _smoke_async_tools()
         _smoke_callback_errors()
@@ -426,6 +433,58 @@ def _smoke_wrapper_honesty() -> None:
         intercept.clear_cb()
         httpio.uninstall()
     print("wrapper-ok", first.calls, second.calls)
+
+
+def _smoke_chamber_error_propagates() -> None:
+    """An unreachable chamber must not come back as a tool failure, at any layer.
+    ticket_logic.http_json caught everything urllib raised and returned
+    {"ok": false, "error": "unavailable"}, and the tool wrapper answered for a
+    body that raised, so a dead chamber was scored as the agent mishandling a
+    tool at exactly the moment the harness had broken."""
+    import os
+    import sys
+
+    from . import httpio, intercept
+    from .callback import Callback, CallbackError
+
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    ex = os.path.join(root, "examples")
+    if ex not in sys.path:
+        sys.path.insert(0, ex)
+    import ticket_logic
+
+    # A chamber at a closed port: every callback raises CallbackError.
+    dead = Callback("http://127.0.0.1:1", "tok", timeout=1.0)
+    spec = {"tools": [{
+        "name": "search_ticket",
+        "http": {"host": "tickets.example", "match": "/search", "method": "GET"},
+    }]}
+    httpio.install(dead, spec)
+    try:
+        intercept.bind_cb(dead)
+        try:
+            ticket_logic.http_json("GET", "http://tickets.example/search?q=Acme")
+        except CallbackError:
+            pass
+        else:
+            raise SystemExit("http_json turned a dead chamber into a tool result")
+
+        def search_ticket(query: str) -> dict:
+            """Tool whose body talks to the intercepted API."""
+            return ticket_logic.http_json("GET", "http://tickets.example/search?q=" + query)
+
+        wrapped = intercept.wrap_callable(search_ticket, "search_ticket", dead)
+        try:
+            wrapped(query="Acme Corp")
+        except CallbackError:
+            pass
+        else:
+            raise SystemExit("the tool wrapper answered for an unreachable chamber")
+    finally:
+        intercept.clear_cb()
+        httpio.clear()
+        httpio.uninstall()
+    print("chamber-error-propagates-ok")
 
 
 def _smoke_tools_list() -> None:
