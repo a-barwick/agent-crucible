@@ -30,7 +30,12 @@ type Client interface {
 	Complete(ctx context.Context, system, user string) (string, error)
 }
 
-func FromEnv(cfg Config) Client {
+const (
+	defaultBaseURL = "https://api.openai.com/v1"
+	defaultModel   = "gpt-4o-mini"
+)
+
+func FromEnv(cfg Config) Config {
 	if cfg.APIKey == "" {
 		cfg.APIKey = first("CRUCIBLE_AI_API_KEY", "OPENAI_API_KEY")
 	}
@@ -38,14 +43,19 @@ func FromEnv(cfg Config) Client {
 		cfg.BaseURL = first("CRUCIBLE_AI_BASE_URL")
 	}
 	if cfg.BaseURL == "" {
-		cfg.BaseURL = "https://api.openai.com/v1"
+		cfg.BaseURL = defaultBaseURL
 	}
 	if cfg.Model == "" {
 		cfg.Model = first("CRUCIBLE_AI_MODEL")
 	}
 	if cfg.Model == "" {
-		cfg.Model = "gpt-4o-mini"
+		cfg.Model = defaultModel
 	}
+	return cfg
+}
+
+func ClientFromEnv(cfg Config) Client {
+	cfg = FromEnv(cfg)
 	if cfg.APIKey == "" {
 		return nil
 	}
@@ -53,11 +63,14 @@ func FromEnv(cfg Config) Client {
 }
 
 func StatusFromEnv() Status {
-	c := FromEnv(Config{})
-	if c == nil {
+	cfg := FromEnv(Config{})
+	if cfg.APIKey == "" {
 		return Status{Provider: "local", Ready: true}
 	}
-	return Status{Provider: "openai", Model: first("CRUCIBLE_AI_MODEL", "gpt-4o-mini"), Ready: true}
+	// first() takes environment variable *names*; passing the fallback literal
+	// as a second name meant looking up a variable called "gpt-4o-mini" and
+	// reporting an empty model whenever CRUCIBLE_AI_MODEL was unset.
+	return Status{Provider: "openai", Model: cfg.Model, Ready: true}
 }
 
 type HTTP struct {

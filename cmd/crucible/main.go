@@ -294,7 +294,7 @@ func generateCmd(args []string) {
 	_ = fs.Parse(args)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	out := ai.Generate(ctx, *seed, agent.CRMTools(), *n, ai.FromEnv(ai.Config{}))
+	out := ai.Generate(ctx, *seed, agent.CRMTools(), *n, ai.ClientFromEnv(ai.Config{}))
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")

@@ -1,7 +1,16 @@
 // Package trace records a trial as an ordered event list the UI can draw.
+//
+// A Recorder is safe to call from more than one goroutine. It is normally
+// driven from a single graph walk, but a sidecar agent may use threads, and a
+// timeline that dropped or interleaved events would be worse than useless —
+// the whole point is that it replays.
 package trace
 
-import "github.com/a-barwick/agent-crucible/internal/fault"
+import (
+	"sync"
+
+	"github.com/a-barwick/agent-crucible/internal/fault"
+)
 
 type Kind string
 
@@ -32,6 +41,7 @@ type Event struct {
 type Trace struct {
 	Events []Event `json:"events"`
 	seq    int
+	mu     sync.Mutex
 }
 
 func New() *Trace { return &Trace{} }
@@ -49,9 +59,19 @@ func (t *Trace) Recorder(now func() int64) *Recorder {
 	return &Recorder{tr: t, now: now}
 }
 
-func (r *Recorder) SetNode(name string) { r.node = name }
+func (r *Recorder) SetNode(name string) {
+	r.tr.mu.Lock()
+	r.node = name
+	r.tr.mu.Unlock()
+}
 
 func (r *Recorder) Add(ev Event) {
+	r.tr.mu.Lock()
+	defer r.tr.mu.Unlock()
+	r.add(ev)
+}
+
+func (r *Recorder) add(ev Event) {
 	r.tr.seq++
 	ev.Seq = r.tr.seq
 	if ev.Tick == 0 {
@@ -64,8 +84,10 @@ func (r *Recorder) Add(ev Event) {
 }
 
 func (r *Recorder) NodeEnter(name string) {
-	r.SetNode(name)
-	r.Add(Event{Kind: KindNodeEnter, Node: name, Message: "enter " + name})
+	r.tr.mu.Lock()
+	defer r.tr.mu.Unlock()
+	r.node = name
+	r.add(Event{Kind: KindNodeEnter, Node: name, Message: "enter " + name})
 }
 
 func (r *Recorder) NodeExit(name, next string) {
@@ -103,7 +125,11 @@ func (r *Recorder) SideEffect(msg string, data map[string]any) {
 	r.Add(Event{Kind: KindSideEffect, Message: msg, Data: data})
 }
 
+// Faults is the distinct faults that actually fired, in the order they landed.
+// A fault that was armed but never applied is not one of them.
 func (t *Trace) Faults() []fault.Type {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	seen := map[fault.Type]bool{}
 	var out []fault.Type
 	for _, ev := range t.Events {
@@ -116,6 +142,8 @@ func (t *Trace) Faults() []fault.Type {
 }
 
 func (t *Trace) Nodes() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	var out []string
 	for _, ev := range t.Events {
 		if ev.Kind == KindNodeEnter {

@@ -204,7 +204,7 @@ func Run(ctx context.Context, cfg Config) Suite {
 		Samples:  samples,
 		Tools:    toolNames(cfg),
 		Agent:    cfg.Agent,
-		Client:   ai.FromEnv(cfg.AI),
+		Client:   ai.ClientFromEnv(cfg.AI),
 	})
 
 	return Suite{
@@ -330,7 +330,7 @@ func runOne(ctx context.Context, cfg Config, n int) Trial {
 		for _, e := range tr.Events {
 			evs = append(evs, e.Message)
 		}
-		v = ai.Evaluate(ctx, v, res, evs, ai.FromEnv(cfg.AI))
+		v = ai.Evaluate(ctx, v, res, evs, ai.ClientFromEnv(cfg.AI))
 	}
 	rec.Add(trace.Event{Kind: trace.KindVerdict, Message: string(v.Outcome) + ": " + v.Reason})
 

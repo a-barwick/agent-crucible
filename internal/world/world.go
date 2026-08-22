@@ -318,7 +318,14 @@ func (w *World) WriteDeal(id, status string, amount int, closeDate, ownerID stri
 	return schema.Result{OK: true, Data: dealData(d)}
 }
 
+// SendEmail is a side effect on the outside world, so it needs the same write
+// permission a CRM mutation does. Without the check a revoked actor could not
+// close a deal but could still tell the customer it had closed.
 func (w *World) SendEmail(to, subject, body string) schema.Result {
+	if !w.Can(w.Actor, PermWrite) {
+		w.UnauthorizedAttempts++
+		return schema.Result{OK: false, Error: "permission_denied"}
+	}
 	if to == "" {
 		return schema.Result{OK: false, Error: "invalid_recipient"}
 	}

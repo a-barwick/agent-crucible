@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"strings"
 
 	"github.com/a-barwick/agent-crucible/internal/agent"
@@ -46,8 +47,14 @@ func Generate(ctx context.Context, seed int64, tools []schema.Tool, n int, cli C
 	if err := json.Unmarshal([]byte(extractJSONArray(text)), &extras); err != nil {
 		return local
 	}
+	// A model asked for n scenarios can return any number. Cap the model's
+	// contribution at n so the caller gets at most the n it asked for on top of
+	// the local set, rather than however many the model felt like emitting.
 	out := local
 	for i, s := range extras {
+		if len(out) >= n+len(local) {
+			break
+		}
 		if s.ID == "" {
 			s.ID = fmt.Sprintf("gen-%d", i)
 		}
@@ -56,38 +63,41 @@ func Generate(ctx context.Context, seed int64, tools []schema.Tool, n int, cli C
 		}
 		out = append(out, Draft{Scenario: hydrate(s, tools), Source: "model"})
 	}
-	if len(out) > n+len(local) {
-		out = out[:n+len(local)]
-	}
 	return out
 }
 
+// generateLocal is the no-model path. The seed genuinely selects which
+// scenarios you get: it used to be drawn and thrown away, so `generate -seed 7`
+// and `generate -seed 8` returned the same first n entries of the library.
 func generateLocal(seed int64, tools []schema.Tool, n int) []Draft {
-	_ = rng.Stream(seed, 0)
 	if schema.LooksLikeCRM(tools) || len(tools) == 0 {
 		lib := scenario.Library()
 		out := make([]Draft, 0, n)
-		for i, s := range lib {
-			if i >= n {
+		for _, i := range shuffledIndexes(rng.Stream(seed, 0), len(lib)) {
+			if len(out) >= n {
 				break
 			}
-			out = append(out, Draft{Scenario: s, Source: "library"})
+			out = append(out, Draft{Scenario: lib[i], Source: "library"})
 		}
 		return out
 	}
 	return generateFromSchema(seed, tools, n)
 }
 
-func generateFromSchema(seed int64, tools []schema.Tool, n int) []Draft {
-	_ = rng.Stream(seed, 1)
-	tpl := schemaTemplate(tools)
-	var out []Draft
-	add := func(d Draft) {
-		if len(out) >= n {
-			return
-		}
-		out = append(out, d)
+// shuffledIndexes is a seeded permutation of [0, count).
+func shuffledIndexes(r *rand.Rand, count int) []int {
+	idx := make([]int, count)
+	for i := range idx {
+		idx[i] = i
 	}
+	r.Shuffle(count, func(i, j int) { idx[i], idx[j] = idx[j], idx[i] })
+	return idx
+}
+
+func generateFromSchema(seed int64, tools []schema.Tool, n int) []Draft {
+	tpl := schemaTemplate(tools)
+	var all []Draft
+	add := func(d Draft) { all = append(all, d) }
 
 	writes, emails0, emails1 := 1, 0, 1
 	notifyF, notifyT := false, true
@@ -192,6 +202,15 @@ func generateFromSchema(seed int64, tools []schema.Tool, n int) []Draft {
 		Fixture: cloneFixture(tpl.fixture),
 	}})
 
+	// The seed picks which of the derived scenarios you get, so asking for two
+	// of five is a choice rather than always the same first two.
+	out := make([]Draft, 0, n)
+	for _, i := range shuffledIndexes(rng.Stream(seed, 1), len(all)) {
+		if len(out) >= n {
+			break
+		}
+		out = append(out, all[i])
+	}
 	return out
 }
 

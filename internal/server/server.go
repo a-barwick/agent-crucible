@@ -171,7 +171,7 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	writeJSON(w, http.StatusOK, ai.Generate(ctx, req.Seed, req.Tools, req.N, ai.FromEnv(ai.Config{})))
+	writeJSON(w, http.StatusOK, ai.Generate(ctx, req.Seed, req.Tools, req.N, ai.ClientFromEnv(ai.Config{})))
 }
 
 // maxBody caps a request. A pasted spec with fixtures is a few kilobytes; the
