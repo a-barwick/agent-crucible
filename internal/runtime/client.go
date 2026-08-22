@@ -94,6 +94,16 @@ type Remote struct {
 	cli    *http.Client
 }
 
+// baseURL turns whatever was pasted into a base the request paths can be joined
+// to. An endpoint is documented as a server that speaks POST /v1/run, which
+// reads as an invitation to paste that whole URL; appending the path to it again
+// asked the user's server for /v1/run/v1/run and reported their 404.
+func baseURL(raw string) string {
+	s := strings.TrimRight(raw, "/")
+	s = strings.TrimSuffix(s, "/v1/run")
+	return strings.TrimRight(s, "/")
+}
+
 func NewRemote(ctx context.Context, opts RemoteOpts) (*Remote, error) {
 	target := opts.URL
 	if target == "" && opts.Spec != nil {
@@ -117,6 +127,7 @@ func NewRemote(ctx context.Context, opts RemoteOpts) (*Remote, error) {
 	} else if err := checkEndpoint(target); err != nil {
 		return nil, err
 	}
+	target = baseURL(target)
 	kind := opts.Kind
 	if kind == "" && opts.Spec != nil {
 		kind = opts.Spec.Runtime
