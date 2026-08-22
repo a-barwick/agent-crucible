@@ -339,6 +339,7 @@ def main(argv=None):
         print("react-ok", react)
 
         _smoke_wrapper_honesty()
+        _smoke_no_escape_to_the_network()
         _smoke_chamber_error_propagates()
         _smoke_tools_list()
         _smoke_async_tools()
@@ -442,6 +443,83 @@ def _smoke_wrapper_honesty() -> None:
         intercept.clear_cb()
         httpio.uninstall()
     print("wrapper-ok", first.calls, second.calls)
+
+
+def _smoke_no_escape_to_the_network() -> None:
+    """Two suites can be in flight against one sidecar at once — two browser tabs
+    are enough. A thread the agent spawned registers no session of its own, and
+    with more than one to choose from the patched libraries used to hand the call
+    to the real network: a scored trial talking to the internet, with the call
+    absent from the trace. It has to refuse instead."""
+    import threading
+
+    from . import httpio
+    from .callback import CallbackError
+
+    class _Chamber:
+        def __init__(self, tag):
+            self.url = "http://127.0.0.1:9/" + tag
+
+        def before(self, name):
+            return {}
+
+        def tool(self, name, args):
+            return {"ok": True, "data": {"id": "tkt-" + name}}
+
+        def state(self, message, data=None):
+            return {"ok": True}
+
+    spec = {"tools": [{
+        "name": "search_ticket",
+        "http": {"host": "tickets.example", "match": "/search", "method": "GET"},
+    }]}
+    outcome: dict[str, object] = {}
+
+    def worker():
+        """A thread with no session of its own, like one an agent spawns."""
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen("http://tickets.example/search?q=Acme", timeout=2) as r:
+                outcome["body"] = json.loads(r.read().decode())
+        except BaseException as e:  # noqa: BLE001 - the class is the assertion
+            outcome["raised"] = e
+
+    def hold(sess_ready, release, tag):
+        httpio.install(_Chamber(tag), spec)
+        sess_ready.set()
+        release.wait(10)
+        httpio.clear()
+
+    # One run in flight: a spawned thread is unambiguous and is intercepted.
+    httpio.install(_Chamber("one"), spec)
+    try:
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join(10)
+        if outcome.get("raised") is not None or (outcome.get("body") or {}).get("id") != "tkt-search_ticket":
+            raise SystemExit("single run: spawned thread was not intercepted: %s" % outcome)
+
+        # A second run in flight: now there is nothing to fall back to.
+        ready, release = threading.Event(), threading.Event()
+        other = threading.Thread(target=hold, args=(ready, release, "two"))
+        other.start()
+        try:
+            if not ready.wait(10):
+                raise SystemExit("second session never registered")
+            outcome.clear()
+            t = threading.Thread(target=worker)
+            t.start()
+            t.join(10)
+        finally:
+            release.set()
+            other.join(10)
+        if not isinstance(outcome.get("raised"), CallbackError):
+            raise SystemExit("two runs in flight: call escaped to the network: %s" % outcome)
+    finally:
+        httpio.clear()
+        httpio.uninstall()
+    print("no-escape-ok")
 
 
 def _smoke_chamber_error_propagates() -> None:

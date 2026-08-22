@@ -75,6 +75,33 @@ def active() -> bool:
     return _installed and _session() is not None
 
 
+def _guard(url: Any) -> None:
+    """Refuse a call this process cannot attribute to a trial.
+
+    A thread the agent spawned has no session of its own. With one run in flight
+    _session falls back to it; with several, there is nothing to fall back to, and
+    the call used to be forwarded to the real network — a scored trial reaching
+    the internet, and a write nobody could see in the trace. This is the chamber
+    failing to contain the run, so it is raised as a chamber error rather than
+    handed to the agent as a tool failure.
+    """
+    if not _installed or _session() is not None or is_passthrough(str(url)):
+        return
+    with _lock:
+        n = len(_sessions)
+    if n < 2:
+        # Nothing is running: no trial to attribute this to and no verdict to
+        # corrupt, so it is left alone.
+        return
+    from .callback import CallbackError
+
+    raise CallbackError(
+        f"cannot tell which trial this call belongs to: {n} runs are in flight and "
+        f"the thread that made it registered none. Refusing to send it to the real "
+        f"network ({str(url)[:120]})"
+    )
+
+
 def hits() -> int:
     s = _session()
     return s.hits if s else 0
@@ -511,6 +538,7 @@ def _urlopen(url, data=None, timeout=_SENTINEL, *args, **kwargs):
         method = "GET" if data is None else "POST"
         full = str(url)
         headers = {}
+    _guard(full)
     if _orig_urlopen is not None and (is_passthrough(full) or not active()):
         # Forward positionally and only pass timeout when the caller did.
         # `_orig(url, data=data, timeout=timeout, *args)` looks like it forwards
@@ -541,6 +569,7 @@ def _patch_requests() -> None:
         return
 
     def request(session, method, url, **kwargs):
+        _guard(url)
         if not active() or is_passthrough(str(url)):
             return orig(session, method, url, **kwargs)
         body = kwargs.get("json")
@@ -582,6 +611,7 @@ def _patch_httpx() -> None:
 
     def _send(self, request, **kwargs):
         url = str(request.url)
+        _guard(url)
         if not active() or is_passthrough(url):
             return orig_sync(self, request, **kwargs)
         status, payload = dispatch(request.method, url, dict(request.headers), request.content)
@@ -600,6 +630,7 @@ def _patch_httpx() -> None:
 
         async def _asend(self, request, **kwargs):
             url = str(request.url)
+            _guard(url)
             if not active() or is_passthrough(url):
                 return await orig_async(self, request, **kwargs)
             status, payload = dispatch(request.method, url, dict(request.headers), request.content)
