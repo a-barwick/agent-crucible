@@ -1,7 +1,8 @@
 """Load a user-written agent file and run it.
 
-The chamber does not compile this graph. The file exports run(cb, req),
-build(cb), graph, or a named export. Tools must callback through `cb`.
+Chamber-aware files still export run(cb, req). Unmodified files export
+run(req), build(), graph, or an ADK agent — their @tool / FunctionTool /
+OpenAI dispatch tables are wrapped so tools hit FaultBus.
 """
 
 from __future__ import annotations
@@ -10,6 +11,8 @@ import importlib.util
 import os
 import sys
 from typing import Any
+
+from . import intercept
 
 
 def has_entry(req: dict) -> bool:
@@ -62,26 +65,51 @@ def run(cb, req: dict) -> dict:
     entry = req.get("entry") or spec.get("entry")
     export = req.get("export") or spec.get("export") or ""
     mod = load_module(entry)
+    intercept.wrap_module(mod, cb, spec)
 
     if export:
         obj = getattr(mod, export, None)
         if obj is None:
             raise AttributeError(f"{entry} has no export {export!r}")
         if export == "build" or getattr(obj, "__name__", "") == "build":
-            return _invoke_graph(obj(cb), req)
+            return _invoke_graph(_call_build(obj, cb), req, cb)
         if callable(obj):
-            return _normalize(obj(cb, req), req)
+            return _call_run(obj, cb, req)
 
     if callable(getattr(mod, "run", None)):
-        return _normalize(mod.run(cb, req), req)
+        return _call_run(mod.run, cb, req)
     if callable(getattr(mod, "build", None)):
-        return _invoke_graph(mod.build(cb), req)
-    if getattr(mod, "graph", None) is not None:
-        return _invoke_graph(mod.graph, req)
+        return _invoke_graph(_call_build(mod.build, cb), req, cb)
+    for attr in ("graph", "app", "compiled"):
+        if getattr(mod, attr, None) is not None:
+            return _invoke_graph(getattr(mod, attr), req, cb)
+    if getattr(mod, "root_agent", None) is not None or getattr(mod, "agent", None) is not None:
+        raise RuntimeError(f"{entry} exported an agent but no run() — add run(req)")
     raise RuntimeError(f"{entry} has no run/build/graph export")
 
 
-def _invoke_graph(graph: Any, req: dict) -> dict:
+def _call_build(fn, cb):
+    if intercept.takes_callback(fn):
+        try:
+            return fn(cb)
+        except TypeError:
+            return fn()
+    try:
+        return fn()
+    except TypeError:
+        return fn(cb)
+
+
+def _call_run(fn, cb, req: dict) -> dict:
+    if intercept.takes_callback(fn):
+        return _normalize(fn(cb, req), req)
+    hooked = intercept.apply_plan_hook(cb, req)
+    return _normalize(fn(hooked), hooked)
+
+
+def _invoke_graph(graph: Any, req: dict, cb=None) -> dict:
+    if cb is not None and not intercept.takes_callback(getattr(graph, "invoke", None) or (lambda: None)):
+        req = intercept.apply_plan_hook(cb, req)
     seed = {
         "objective": req.get("objective") or "",
         "memory": req.get("memory") or {},
@@ -102,6 +130,18 @@ def _normalize(out: Any, req: dict) -> dict:
     if isinstance(out, dict) and "claimed" in out:
         out.setdefault("runtime", req.get("runtime") or "langgraph")
         out.setdefault("checkpoint", True)
+        intent = out.get("intent") or {}
+        if isinstance(intent, dict):
+            if intent.get("company") and not intent.get("entity"):
+                intent["entity"] = intent["company"]
+            if intent.get("deal_action") and not intent.get("action"):
+                intent["action"] = intent["deal_action"]
+            claimed = out.get("claimed") or {}
+            rid = claimed.get("record_id") or claimed.get("deal_id") or ""
+            if rid and not claimed.get("record_id"):
+                claimed["record_id"] = rid
+            out["intent"] = intent
+            out["claimed"] = claimed
         return out
     from . import patient
 

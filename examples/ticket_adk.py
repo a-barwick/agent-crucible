@@ -9,15 +9,42 @@ from __future__ import annotations
 from ticket_graph import STATUS, apply_hook, data_of, finish, last_company, parse_objective, transport
 
 HAS_ADK = False
+GoogleLlmAgent = None
 try:  # pragma: no cover
-    from google.adk.agents import LlmAgent  # type: ignore
+    from google.adk.agents import LlmAgent as GoogleLlmAgent  # type: ignore
 
     HAS_ADK = True
 except Exception:
-    LlmAgent = None
+    GoogleLlmAgent = None
+
+
+class LlmAgent:
+    """Constructed when google.adk is missing so this file always builds an LlmAgent."""
+
+    def __init__(self, name, instruction="", tools=None, model=None, **kwargs):
+        self.name = name
+        self.instruction = instruction
+        self.tools = list(tools or [])
+        self.model = model or "scripted"
+
 
 INSTRUCTION = "Resolve the named ticket. Search, then update. Do not invent ids."
 TOOLS = ["search_ticket", "update_ticket"]
+
+
+def build_llm_agent():
+    if GoogleLlmAgent is not None:
+        try:
+            return GoogleLlmAgent(name="ticket-bot", instruction=INSTRUCTION, tools=list(TOOLS), model="scripted"), True
+        except Exception:
+            try:
+                return GoogleLlmAgent(name="ticket-bot", instruction=INSTRUCTION, tools=list(TOOLS)), True
+            except Exception:
+                pass
+    return LlmAgent(name="ticket-bot", instruction=INSTRUCTION, tools=list(TOOLS), model="scripted"), False
+
+
+root_agent, GOOGLE_ADK_CONSTRUCTED = build_llm_agent()
 
 
 class SessionService:
@@ -130,6 +157,10 @@ class Runner:
 
 
 def run(cb, req: dict) -> dict:
-    agent = Agent(name="ticket-bot", instruction=INSTRUCTION, tools=list(TOOLS))
+    agent = Agent(name=root_agent.name, instruction=root_agent.instruction, tools=list(TOOLS))
     runner = Runner(agent, SessionService(), cb)
-    return runner.run(req.get("thread_id") or "adk-ticket", req)
+    out = runner.run(req.get("thread_id") or "adk-ticket", req)
+    adk = out.setdefault("adk", {})
+    adk["llm_agent"] = type(root_agent).__name__
+    adk["google_adk_constructed"] = GOOGLE_ADK_CONSTRUCTED
+    return out

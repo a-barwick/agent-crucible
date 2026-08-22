@@ -14,3 +14,12 @@ func TestFindEntryTicketGraph(t *testing.T) {
 		t.Fatalf("missing %s", got)
 	}
 }
+
+func TestFindEntryNativeAgents(t *testing.T) {
+	for _, name := range []string{"examples/native_ticket.py", "examples/native_adk.py", "examples/native_openai.py", "examples/native_ticket.mjs"} {
+		got := FindEntry(name)
+		if got == "" || !fileExists(got) {
+			t.Fatalf("FindEntry %s: %q", name, got)
+		}
+	}
+}

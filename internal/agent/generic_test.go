@@ -12,6 +12,29 @@ import (
 	"github.com/a-barwick/agent-crucible/internal/world"
 )
 
+func TestJSEntry(t *testing.T) {
+	if !JSEntry("examples/native_ticket.mjs") || JSEntry("examples/native_ticket.py") {
+		t.Fatalf("JSEntry mismatch")
+	}
+	if !JSRuntime("js") || JSRuntime("langgraph") {
+		t.Fatalf("JSRuntime mismatch")
+	}
+}
+
+func TestParseIntentAliases(t *testing.T) {
+	in := ParseIntentWith("Resolve the Acme Corp ticket.", []string{"Acme Corp", "Globex"})
+	if in.Company != "Acme Corp" || in.Entity != "Acme Corp" {
+		t.Fatalf("entity aliases: %+v", in)
+	}
+	if in.DealAction != "resolve" || in.Action != "resolve" {
+		t.Fatalf("action aliases: %+v", in)
+	}
+	round := ParseModelIntent(`{"entity":"Globex","action":"on_hold","notify":false}`, "x", []string{"Acme Corp", "Globex"})
+	if round.Company != "Globex" || round.DealAction != "on_hold" {
+		t.Fatalf("model aliases: %+v", round)
+	}
+}
+
 func TestPastedCRMSpecHappy(t *testing.T) {
 	spec := NewCRM(nil).Spec()
 	spec.Name = "pasted-closer"

@@ -160,6 +160,139 @@ func TestHTTPProcessAgent(t *testing.T) {
 	}
 }
 
+func TestNativeSourcesHaveNoCallback(t *testing.T) {
+	root := runtime.FindRepoRoot()
+	if root == "" {
+		t.Skip("repo root not found")
+	}
+	for _, rel := range []string{
+		"examples/native_ticket.py",
+		"examples/native_adk.py",
+		"examples/native_openai.py",
+		"examples/native_ticket.mjs",
+	} {
+		raw, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := string(raw)
+		if strings.Contains(body, "retry_tool") || strings.Contains(body, "cb.before") || strings.Contains(body, "Callback(") {
+			t.Fatalf("%s still talks to the chamber callback", rel)
+		}
+	}
+}
+
+func TestNativeLangGraphClean(t *testing.T) {
+	if !runtime.HaveLangGraph() {
+		t.Skip("langgraph not installed")
+	}
+	s := Run(context.Background(), Config{
+		Seed: 3, Trials: 2, P: 0, Agent: agent.IDNativeLangGraph, Faults: fault.MVP,
+	})
+	if s.Survival != 1 {
+		t.Fatalf("native langgraph survival %v counts=%v", s.Survival, s.Counts)
+		for _, tr := range s.Trials {
+			t.Logf("trial %d %s %s %v", tr.N, tr.Outcome, tr.Reason, tr.Violations)
+		}
+	}
+}
+
+func TestNativeADKClean(t *testing.T) {
+	if !runtime.HaveLangGraph() {
+		t.Skip("langgraph not installed")
+	}
+	s := Run(context.Background(), Config{
+		Seed: 3, Trials: 2, P: 0, Agent: agent.IDNativeADK, Faults: fault.MVP,
+	})
+	if s.Survival != 1 {
+		t.Fatalf("native adk survival %v counts=%v", s.Survival, s.Counts)
+	}
+}
+
+func TestNativeOpenAIClean(t *testing.T) {
+	if !runtime.HaveLangGraph() {
+		t.Skip("langgraph not installed")
+	}
+	s := Run(context.Background(), Config{
+		Seed: 3, Trials: 2, P: 0, Agent: agent.IDNativeOpenAI, Faults: fault.MVP,
+	})
+	if s.Survival != 1 {
+		t.Fatalf("native openai survival %v counts=%v", s.Survival, s.Counts)
+	}
+}
+
+func TestNativeJSClean(t *testing.T) {
+	if !runtime.HaveNode() {
+		t.Skip("node not installed")
+	}
+	s := Run(context.Background(), Config{
+		Seed: 3, Trials: 2, P: 0, Agent: agent.IDNativeJS, Faults: fault.MVP,
+	})
+	if s.Survival != 1 {
+		t.Fatalf("native js survival %v counts=%v", s.Survival, s.Counts)
+		for _, tr := range s.Trials {
+			t.Logf("trial %d %s %s %v", tr.N, tr.Outcome, tr.Reason, tr.Violations)
+		}
+	}
+}
+
+func TestNativeEntryWithoutSpec(t *testing.T) {
+	if !runtime.HaveLangGraph() {
+		t.Skip("langgraph not installed")
+	}
+	entry := runtime.FindEntry("examples/native_ticket.py")
+	spec := agent.Spec{Entry: entry, Runtime: "langgraph", Tools: agent.TicketTools()}
+	s := Run(context.Background(), Config{
+		Seed: 3, Trials: 2, P: 0, Agent: agent.IDPasted, Spec: &spec, Faults: fault.MVP,
+	})
+	if s.Survival != 1 {
+		t.Fatalf("pasted native entry survival %v counts=%v", s.Survival, s.Counts)
+	}
+	if s.Scenario != scenario.TicketID && s.Config.Scenario != scenario.TicketID {
+		t.Fatalf("drop-in entry should default to ticket, got %q / %q", s.Scenario, s.Config.Scenario)
+	}
+}
+
+func TestNativeMalformedCollapses(t *testing.T) {
+	if !runtime.HaveLangGraph() {
+		t.Skip("langgraph not installed")
+	}
+	s := Run(context.Background(), Config{
+		Seed: 1, Trials: 12, P: 1, Agent: agent.IDNativeLangGraph,
+		Faults: []fault.Type{fault.Malformed},
+	})
+	if s.Survival > 0.25 {
+		t.Fatalf("native malformed should collapse, got %v counts=%v", s.Survival, s.Counts)
+	}
+	text := s.Critique.Headline + " " + strings.Join(s.Critique.Paragraphs, " ")
+	if strings.Contains(text, "CRM tool") {
+		t.Fatalf("native critique still CRM-shaped: %s", text)
+	}
+}
+
+func TestNativeFullCatalogFires(t *testing.T) {
+	if !runtime.HaveLangGraph() {
+		t.Skip("langgraph not installed")
+	}
+	for _, ft := range fault.All {
+		s := Run(context.Background(), Config{
+			Seed: 4, Trials: 8, P: 1, Agent: agent.IDNativeLangGraph,
+			Faults: []fault.Type{ft},
+		})
+		seen := false
+		for _, tr := range s.Trials {
+			for _, f := range tr.Faults {
+				if f == ft {
+					seen = true
+				}
+			}
+		}
+		if !seen {
+			t.Fatalf("fault %s never fired on native agent counts=%v", ft, s.Counts)
+		}
+	}
+}
+
 func runtimeHealthy(url string) bool {
 	cli := &http.Client{Timeout: 200 * time.Millisecond}
 	res, err := cli.Get(url + "/health")

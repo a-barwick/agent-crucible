@@ -3,6 +3,8 @@ package agent
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
 
 	"github.com/a-barwick/agent-crucible/internal/schema"
 	"github.com/a-barwick/agent-crucible/internal/trace"
@@ -61,10 +63,45 @@ type Result struct {
 }
 
 // Intent is the planner's parse of the (possibly stale) objective.
+// Company/DealAction are the closer's names; Entity/Action are aliases
+// so a ticket (or any) agent is not forced to speak "deal".
 type Intent struct {
 	Company    string `json:"company"`
-	DealAction string `json:"deal_action"` // close_won | on_hold | none
+	DealAction string `json:"deal_action"` // close_won | on_hold | refund | resolve | none
 	Notify     bool   `json:"notify"`
+	Entity     string `json:"entity,omitempty"`
+	Action     string `json:"action,omitempty"`
+}
+
+func (in Intent) EntityName() string {
+	if in.Entity != "" {
+		return in.Entity
+	}
+	return in.Company
+}
+
+func (in Intent) ActionName() string {
+	if in.Action != "" {
+		return in.Action
+	}
+	return in.DealAction
+}
+
+// SyncAliases fills Entity/Action from Company/DealAction and the reverse.
+func (in Intent) SyncAliases() Intent {
+	if in.Company == "" && in.Entity != "" {
+		in.Company = in.Entity
+	}
+	if in.Entity == "" {
+		in.Entity = in.Company
+	}
+	if in.DealAction == "" && in.Action != "" {
+		in.DealAction = in.Action
+	}
+	if in.Action == "" {
+		in.Action = in.DealAction
+	}
+	return in
 }
 
 // Claim is what the agent believes it did. The judge compares this to the world.
@@ -72,18 +109,34 @@ type Claim struct {
 	Wrote    bool   `json:"wrote"`
 	Notified bool   `json:"notified"`
 	DealID   string `json:"deal_id"`
+	RecordID string `json:"record_id,omitempty"`
 	Status   string `json:"status"`
 	Error    string `json:"error"`
+}
+
+func (c Claim) TargetID() string {
+	if c.RecordID != "" {
+		return c.RecordID
+	}
+	return c.DealID
 }
 
 // Memory is the checkpoint the graph trusts more than a fresh fetch.
 type Memory struct {
 	DealID       string `json:"deal_id,omitempty"`
+	RecordID     string `json:"record_id,omitempty"`
 	DealStatus   string `json:"deal_status,omitempty"`
 	Amount       int    `json:"amount,omitempty"`
 	OwnerID      string `json:"owner_id,omitempty"`
 	HasWritePerm bool   `json:"has_write_perm,omitempty"`
 	Company      string `json:"company,omitempty"`
+}
+
+func (m Memory) TargetID() string {
+	if m.RecordID != "" {
+		return m.RecordID
+	}
+	return m.DealID
 }
 
 // State is the LangGraph-style reducible blob passed between nodes.
@@ -123,4 +176,22 @@ type Hook interface {
 type Agent interface {
 	Spec() Spec
 	Run(ctx context.Context, st State, bus Bus, rec *trace.Recorder, hook Hook) (Result, error)
+}
+
+// JSEntry reports whether this path is a Node agent file.
+func JSEntry(entry string) bool {
+	switch strings.ToLower(filepath.Ext(entry)) {
+	case ".js", ".mjs", ".cjs":
+		return true
+	}
+	return false
+}
+
+// JSRuntime reports whether the spec asked for the Node sidecar.
+func JSRuntime(runtime string) bool {
+	switch strings.ToLower(runtime) {
+	case "js", "javascript", "node":
+		return true
+	}
+	return false
 }

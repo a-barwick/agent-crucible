@@ -15,12 +15,14 @@ The AI is not the test runner. The runner is deterministic — seeded, replayabl
 | `aether-closer` | in-process Go | Fast slider twin: nodes, `MemorySaver`, invoked planner |
 | `aether-closer-langgraph` | Python | Sample closer as a real `langgraph.StateGraph` + `InMemorySaver` |
 | `aether-closer-adk` | Python | Sample closer as ADK `Agent` + `Runner` + `SessionService` |
-| `ticket-langgraph` | Python | **A user-written graph**: `examples/ticket_graph.py`. The sidecar imports it. |
-| `ticket-adk` | Python | **A user-written ADK agent**: `examples/ticket_adk.py` |
-| `remote` | HTTP | Any process that speaks `POST /v1/run` and callbacks for tools |
+| `ticket-langgraph` / `native-langgraph` | Python | **Unmodified LangGraph**: `examples/native_ticket.py`. `@tool` functions the chamber wraps. |
+| `ticket-adk` / `native-adk` | Python | **Unmodified ADK**: `examples/native_adk.py`. `FunctionTool` + `LlmAgent`. |
+| `native-openai` | Python | OpenAI tools: `chat.completions` schemas + `DISPATCH` |
+| `native-js` | Node | **Unmodified JS**: `examples/native_ticket.mjs`. Plain tool functions. |
+| `remote` | HTTP | Any process that speaks `POST /v1/run` (it may wrap an unmodified file) |
 | `pasted` | spec / entry | Paste schemas, or set `spec.entry` / `spec.endpoint` |
 
-The chamber stays on this side of the tools. Drop-in files and processes never touch the world; they HTTP-callback into `FaultBus`.
+The chamber stays on this side of the tools. After import it wraps `@tool`, ADK `FunctionTool`, OpenAI dispatch tables, and JS `tools` so invocations go through `FaultBus`. The agent file does not import the world and does not call `cb.retry_tool`.
 
 ## Scenario library
 
@@ -42,13 +44,15 @@ python3 -m pip install -r runtime/requirements.txt   # LangGraph sidecar
 go run ./cmd/crucible serve -addr :8080
 ```
 
-Open http://localhost:8080. Drag *tool failure probability* from 0% to 30%. Load *ticket LangGraph* (a real file, not a compiled walk) or paste a spec. The ensemble is fixed: raising `p` only adds faults.
+Open http://localhost:8080. Drag *tool failure probability* from 0% to 30%. Load *unmodified LangGraph* (a real file whose `@tool` functions would call HTTP) or paste a spec. The ensemble is fixed: raising `p` only adds faults.
 
 ```bash
 crucible run -seed 42 -trials 40 -p 0.3
 crucible run -agent ticket-langgraph -p 0.3 -faults all
-crucible run -entry examples/ticket_graph.py -spec examples/ticket.json
-crucible run -agent remote -endpoint http://127.0.0.1:8092 -spec examples/ticket.json
+crucible run -entry examples/native_ticket.py
+crucible run -agent native-openai -p 0.3
+crucible run -agent native-js -p 0.3
+crucible run -entry examples/native_ticket.py -spec examples/native_ticket.json
 crucible run -agent aether-closer-langgraph -scenario refund-acme -p 0.2
 crucible replay -seed 42 -trial 7 -p 0.3
 crucible agents
@@ -56,11 +60,11 @@ crucible scenarios
 crucible generate -n 5
 ```
 
-An arbitrary process:
+An arbitrary process that still loads an unmodified graph:
 
 ```bash
-python3 examples/http_agent.py --addr 127.0.0.1:8092
-crucible run -agent remote -endpoint http://127.0.0.1:8092 -spec examples/ticket.json
+python3 examples/http_native.py --addr 127.0.0.1:8094
+crucible run -agent remote -endpoint http://127.0.0.1:8094 -spec examples/native_ticket.json
 ```
 
 ## Faults
@@ -102,12 +106,12 @@ Ambiguous traces (claimed success, world unfinished, no unsafe mutation) go to t
 
 ## Bring your own agent
 
-1. **Drop a file.** `spec.entry` (or `-entry`) is a Python module that exports `run(cb, req)`, `build(cb)`, or `graph`. The sidecar imports *your* graph. See `examples/ticket_graph.py` and `examples/ticket_adk.py`.
-2. **Drop a process.** `spec.endpoint` (or `-endpoint` / agent `remote`) is any HTTP server that speaks `POST /v1/run` and callbacks for tools. See `examples/http_agent.py`.
+1. **Drop a file.** `spec.entry` (or `-entry`) is a Python or Node module. Export `run(req)` (no callback), `build()`, `graph`, or the older `run(cb, req)`. The sidecar imports *your* graph and wraps its tools. See `examples/native_ticket.py`, `examples/native_adk.py`, `examples/native_openai.py`, `examples/native_ticket.mjs`.
+2. **Drop a process.** `spec.endpoint` (or `-endpoint` / agent `remote`) is any HTTP server that speaks `POST /v1/run`. See `examples/http_native.py` (wraps an unmodified file) or `examples/http_agent.py` (chamber-aware).
 3. **Paste schemas** when you do not have a file yet (`spec.tools`, optional `spec.graph`). The chamber will compile a walk. That is a fallback, not “give it an agent.”
 4. **Generate scenarios** from the tools. Drafts carry `expect` + `fixtures` and actually run.
 
-A drop-in file receives `cb`. Call `cb.retry_tool(name, args)`, `cb.before(node)`, and optionally `cb.state(message, data)` so the critique can read evidence. Do not import the world.
+You do not rewrite the agent around `cb.retry_tool`. Define `@tool` / `FunctionTool` / OpenAI functions / JS `tools` as you would in production (they can even attempt a live HTTP call). After import the chamber replaces those implementations. Intent uses `entity` / `action` aliases so the planner is not stuck on `company` / `deal_action`.
 
 The judge scores `expect` — `record_id` / `status` / `writes` / `emails` / `record_fields` — not hardcoded Acme ids. The full fault catalog (all nine) runs against the same task. Critique copy names the write tool that actually failed (`update_ticket`, not “the CRM tool”) when the spec is not the sample closer.
 
@@ -116,7 +120,7 @@ The judge scores `expect` — `record_id` / `status` / `writes` / `emails` / `re
   "spec": {
     "name": "ticket-bot",
     "runtime": "langgraph",
-    "entry": "examples/ticket_graph.py",
+    "entry": "examples/native_ticket.py",
     "tools": [
       {"name": "search_ticket", "required": ["query"]},
       {"name": "update_ticket", "required": ["id", "status"]}
@@ -152,6 +156,7 @@ internal/cluster/      failure fingerprints
 internal/critique/     critique types
 internal/server/       /api/meta /api/run /api/sweep /api/replay /api/generate
 runtime/crucible_rt/   sidecar + loader for user entry files
-examples/              drop-in LangGraph, ADK, and HTTP process agents
+examples/              unmodified LangGraph / ADK / OpenAI / JS agents
+runtime/js/            Node sidecar that wraps JS tool exports
 web/                   timeline UI
 ```

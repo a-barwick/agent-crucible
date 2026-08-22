@@ -147,7 +147,7 @@ def infer_args(state: dict, tool: str, spec: dict) -> dict:
             args[name] = v
     if is_write(tool):
         intent = state.get("intent") or {}
-        status = action_status(intent.get("deal_action") or "")
+        status = action_status(intent.get("action") or intent.get("deal_action") or "")
         if status and not args.get("status"):
             args["status"] = status
     return args
@@ -167,14 +167,14 @@ def default_arg_names(tool: str) -> list[str]:
 def arg_from_state(state: dict, name: str, kind: str):
     intent = state.get("intent") or {}
     if name in ("company", "query", "name", "title"):
-        return intent.get("company") or None
+        return intent.get("entity") or intent.get("company") or None
     if name in ("id", "record_id", "ticket_id", "deal_id"):
-        return state.get("deal_id") or None
+        return state.get("record_id") or state.get("deal_id") or None
     if name == "contact_id":
         return state.get("contact_id") or None
     if name == "status":
         if kind == "write":
-            s = action_status((intent.get("deal_action") or ""))
+            s = action_status((intent.get("action") or intent.get("deal_action") or ""))
             if s:
                 return s
         return state.get("status") or None
@@ -224,12 +224,12 @@ def apply_saves(state: dict, data: dict | None, save: dict | None) -> None:
 
 def state_value(state: dict, path: str):
     intent = state.get("intent") or {}
-    if path in ("intent.company", "company", "query", "name"):
-        return intent.get("company")
+    if path in ("intent.company", "intent.entity", "company", "entity", "query", "name"):
+        return intent.get("entity") or intent.get("company")
     if path == "contact_id":
         return state.get("contact_id")
     if path in ("deal_id", "id", "record_id", "ticket_id"):
-        return state.get("deal_id")
+        return state.get("record_id") or state.get("deal_id")
     if path == "ae":
         return state.get("ae")
     if path == "status":
@@ -298,12 +298,14 @@ def _tool(cb, state: dict, name: str, bind: dict, spec: dict) -> dict:
     d = patient.data(res)
     apply_saves(state, d, bind.get("save"))
     mem = state.get("memory") or {}
-    if classify(tool) == "read" and mem.get("deal_id"):
-        state["deal_id"] = mem["deal_id"]
+    mid = (mem.get("record_id") or mem.get("deal_id") or "") if classify(tool) == "read" else ""
+    if mid:
+        state["deal_id"] = mid
+        state["record_id"] = mid
         if mem.get("deal_status"):
             state["status"] = mem["deal_status"]
         if hasattr(cb, "state"):
-            cb.state("enrich trusted stale memory", {"deal_id": state["deal_id"], "tool": tool})
+            cb.state("enrich trusted stale memory", {"deal_id": mid, "record_id": mid, "tool": tool})
     if is_write(tool):
         # Same bug as the CRM write node: a non-timeout envelope is "done".
         state["wrote"] = True

@@ -15,6 +15,16 @@ import (
 	"github.com/a-barwick/agent-crucible/internal/trace"
 )
 
+func jsOpts(opts RemoteOpts) bool {
+	if opts.Kind == "js" || opts.Kind == "javascript" || opts.Kind == "node" {
+		return true
+	}
+	if opts.Spec != nil && (agent.JSRuntime(opts.Spec.Runtime) || agent.JSEntry(opts.Spec.Entry)) {
+		return true
+	}
+	return false
+}
+
 type RemoteOpts struct {
 	Kind string // langgraph | adk
 	URL  string
@@ -34,16 +44,28 @@ func NewRemote(ctx context.Context, opts RemoteOpts) (*Remote, error) {
 	if url == "" && opts.Spec != nil {
 		url = opts.Spec.Endpoint
 	}
+	js := jsOpts(opts)
 	if url == "" {
-		p, err := EnsureLocal(ctx)
-		if err != nil {
-			return nil, err
+		if js {
+			p, err := EnsureNode(ctx)
+			if err != nil {
+				return nil, err
+			}
+			url = p.URL
+		} else {
+			p, err := EnsureLocal(ctx)
+			if err != nil {
+				return nil, err
+			}
+			url = p.URL
 		}
-		url = p.URL
 	}
 	kind := opts.Kind
 	if kind == "" && opts.Spec != nil {
 		kind = opts.Spec.Runtime
+	}
+	if js {
+		kind = "js"
 	}
 	if kind == "" {
 		kind = "langgraph"

@@ -27,6 +27,7 @@ class Handler(BaseHTTPRequestHandler):
                 "langgraph": True,
                 "adk": True,
                 "google_adk": adk_closer.HAS_ADK,
+                "intercept": True,
             })
             return
         self._write(404, {"error": "not found"})
@@ -108,6 +109,49 @@ def main(argv=None):
         if not path.endswith("ticket_graph.py"):
             raise SystemExit("entry resolve: %s" % path)
         print("loader-ok", path)
+
+        from . import intercept
+        from langchain_core.tools import tool as lc_tool
+
+        hits = []
+
+        class _Spy:
+            def before(self, name):
+                hits.append(("before", name))
+                return {}
+
+            def tool(self, name, args):
+                hits.append(("tool", name, args))
+                if name == "search_ticket":
+                    return {"ok": True, "data": {"id": "tkt-acme", "status": "Open", "company": "Acme Corp"}}
+                if name == "update_ticket":
+                    return {"ok": True, "data": {"id": args.get("id"), "status": args.get("status")}}
+                return {"ok": False, "error": "unknown"}
+
+            def state(self, message, data=None):
+                hits.append(("state", message))
+                return {"ok": True}
+
+        @lc_tool
+        def search_ticket(query: str) -> dict:
+            raise RuntimeError("live search was not intercepted")
+
+        spy = _Spy()
+        intercept.wrap_tool(search_ticket, spy, "search_ticket")
+        got = search_ticket.invoke({"query": "Acme Corp"})
+        if got.get("id") != "tkt-acme":
+            raise SystemExit("intercept invoke: %s" % got)
+        if not any(h[0] == "tool" and h[1] == "search_ticket" for h in hits):
+            raise SystemExit("intercept missed tool call: %s" % hits)
+        print("intercept-ok", got.get("id"))
+
+        native = loader.resolve_entry("examples/native_ticket.py")
+        if not native.endswith("native_ticket.py"):
+            raise SystemExit("native resolve: %s" % native)
+        raw = open(native, encoding="utf-8").read()
+        if "retry_tool" in raw or "cb.before" in raw:
+            raise SystemExit("native_ticket.py is still chamber-aware")
+        print("native-ok", native)
         return
     addr = "127.0.0.1:8091"
     if "--addr" in argv:

@@ -41,7 +41,7 @@ func handleMeta(w http.ResponseWriter, _ *http.Request) {
 	crm := agent.NewCRM(nil)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"agent":     crm.Spec(),
-		"agents":    agent.Catalog(rt.Ready),
+		"agents":    agent.Catalog(rt.Ready, runtime.HaveNode()),
 		"scenarios": scenario.Summaries(),
 		"faults":    fault.Catalog(),
 		"runtime":   rt,
@@ -52,6 +52,18 @@ func handleMeta(w http.ResponseWriter, _ *http.Request) {
 			},
 			agent.IDTicketADK: map[string]any{
 				"spec": agent.TicketADKSpec(), "scenario": scenario.Ticket(),
+			},
+			agent.IDNativeLangGraph: map[string]any{
+				"spec": agent.NativeLangGraphSpec(), "scenario": scenario.Ticket(),
+			},
+			agent.IDNativeADK: map[string]any{
+				"spec": agent.NativeADKSpec(), "scenario": scenario.Ticket(),
+			},
+			agent.IDNativeOpenAI: map[string]any{
+				"spec": agent.NativeOpenAISpec(), "scenario": scenario.Ticket(),
+			},
+			agent.IDNativeJS: map[string]any{
+				"spec": agent.NativeJSSpec(), "scenario": scenario.Ticket(),
 			},
 		},
 		"defaults": map[string]any{
@@ -111,11 +123,11 @@ func handleSweep(w http.ResponseWriter, r *http.Request) {
 	if step == 0 {
 		step = 0.01
 	}
-	if agent.NeedsPython(req.Agent, req.Spec) && step < 0.05 {
+	if (agent.NeedsPython(req.Agent, req.Spec) || agent.NeedsNode(req.Agent, req.Spec)) && step < 0.05 {
 		step = 0.05
 	}
 	timeout := 30 * time.Second
-	if agent.NeedsPython(req.Agent, req.Spec) {
+	if agent.NeedsPython(req.Agent, req.Spec) || agent.NeedsNode(req.Agent, req.Spec) {
 		timeout = 120 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)

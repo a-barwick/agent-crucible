@@ -85,19 +85,60 @@ func ticketBase(runtime, entry, framework, desc string) Spec {
 func TicketLangGraphSpec() Spec {
 	return ticketBase(
 		"langgraph",
-		"examples/ticket_graph.py",
+		"examples/native_ticket.py",
 		"langgraph",
-		"User-written LangGraph. Search then update. Tools callback into the chamber.",
+		"Unmodified LangGraph. @tool functions the chamber intercepts. No cb.retry_tool.",
 	)
 }
 
 func TicketADKSpec() Spec {
 	s := ticketBase(
 		"adk",
-		"examples/ticket_adk.py",
+		"examples/native_adk.py",
 		"adk",
-		"User-written ADK agent. Same ticket tools, ADK-shaped loop.",
+		"Unmodified ADK agent. FunctionTool + LlmAgent. Chamber wraps the functions.",
 	)
 	s.Export = "run"
 	return s
+}
+
+func NativeLangGraphSpec() Spec {
+	return TicketLangGraphSpec()
+}
+
+func NativeADKSpec() Spec {
+	return TicketADKSpec()
+}
+
+func NativeOpenAISpec() Spec {
+	s := ticketBase(
+		"openai",
+		"examples/native_openai.py",
+		"openai",
+		"OpenAI tools agent. chat.completions schemas + DISPATCH. Chamber wraps the callables.",
+	)
+	s.Export = "run"
+	return s
+}
+
+func NativeJSSpec() Spec {
+	s := ticketBase(
+		"js",
+		"examples/native_ticket.mjs",
+		"javascript",
+		"Unmodified Node agent. Plain tool functions the Node sidecar wraps.",
+	)
+	s.Export = "run"
+	return s
+}
+
+// ChamberAwareTicketSpec is the older run(cb, req) file. Kept for the HTTP demo
+// that still speaks the callback protocol from user code.
+func ChamberAwareTicketSpec() Spec {
+	return ticketBase(
+		"langgraph",
+		"examples/ticket_graph.py",
+		"langgraph",
+		"Chamber-aware LangGraph that calls cb.retry_tool. Prefer native_ticket.py.",
+	)
 }

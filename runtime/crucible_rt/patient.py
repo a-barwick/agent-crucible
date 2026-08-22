@@ -25,7 +25,7 @@ def merge_hook(state: dict, hook: dict) -> dict:
     if hook.get("junk") is not None:
         state["junk"] = hook["junk"]
     intent = hook.get("intent")
-    if isinstance(intent, dict) and (intent.get("company") or intent.get("deal_action")):
+    if isinstance(intent, dict) and (intent.get("company") or intent.get("entity") or intent.get("deal_action") or intent.get("action")):
         state["intent"] = intent
     return state
 
@@ -198,13 +198,19 @@ def walk(cb, state: dict) -> dict:
 
 def finish(state: dict, runtime: str) -> dict:
     intent = state.get("intent") or {}
+    if intent.get("company") and not intent.get("entity"):
+        intent["entity"] = intent["company"]
+    if intent.get("deal_action") and not intent.get("action"):
+        intent["action"] = intent["deal_action"]
+    rid = state.get("record_id") or state.get("ticket_id") or state.get("deal_id") or ""
     return {
         "terminal": state.get("terminal") or "end",
         "intent": intent,
         "claimed": {
             "wrote": bool(state.get("wrote")),
             "notified": bool(state.get("notified")),
-            "deal_id": state.get("deal_id") or "",
+            "deal_id": rid,
+            "record_id": rid,
             "status": state.get("status") or "",
             "error": state.get("last_error") or "",
         },

@@ -57,5 +57,6 @@ type Status struct {
 	URL       string `json:"url,omitempty"`
 	LangGraph bool   `json:"langgraph"`
 	ADK       bool   `json:"adk"`
+	JS        bool   `json:"js,omitempty"`
 	Error     string `json:"error,omitempty"`
 }

@@ -4,7 +4,13 @@ import re
 
 def parse_intent(objective: str, companies: list[str] | None = None) -> dict:
     companies = companies or ["Acme Corp", "Acme Supplies"]
-    intent = {"company": companies[0], "deal_action": "close_won", "notify": True}
+    intent = {
+        "company": companies[0],
+        "entity": companies[0],
+        "deal_action": "close_won",
+        "action": "close_won",
+        "notify": True,
+    }
     low = objective.lower()
     best, best_len = "", 0
     for c in companies:
@@ -12,23 +18,25 @@ def parse_intent(objective: str, companies: list[str] | None = None) -> dict:
             best, best_len = c, len(c)
     if best:
         intent["company"] = best
+        intent["entity"] = best
     elif "acme" in low:
         for c in companies:
             if c == "Acme Corp":
                 intent["company"] = c
+                intent["entity"] = c
                 break
     if "refund" in low:
-        intent["deal_action"] = "refund"
+        intent["deal_action"] = intent["action"] = "refund"
         intent["notify"] = False
     elif "on-hold" in low or "on hold" in low or "do not close" in low or "stop." in low:
-        intent["deal_action"] = "on_hold"
+        intent["deal_action"] = intent["action"] = "on_hold"
     elif "resolve" in low:
-        intent["deal_action"] = "resolve"
+        intent["deal_action"] = intent["action"] = "resolve"
         intent["notify"] = False
     elif "closed-won" in low or "close" in low:
-        intent["deal_action"] = "close_won"
+        intent["deal_action"] = intent["action"] = "close_won"
     else:
-        intent["deal_action"] = "none"
+        intent["deal_action"] = intent["action"] = "none"
     if "do not email" in low:
         intent["notify"] = False
     elif "email" in low:
@@ -43,9 +51,15 @@ def parse_model_intent(text: str, fallback: str, companies: list[str] | None) ->
         text = text[i : j + 1]
     try:
         data = json.loads(text)
-        if isinstance(data, dict) and (data.get("company") or data.get("deal_action")):
+        if isinstance(data, dict) and (data.get("company") or data.get("entity") or data.get("deal_action") or data.get("action")):
             if not data.get("company"):
-                data["company"] = parse_intent(fallback, companies)["company"]
+                data["company"] = data.get("entity") or parse_intent(fallback, companies)["company"]
+            if not data.get("entity"):
+                data["entity"] = data["company"]
+            if not data.get("deal_action"):
+                data["deal_action"] = data.get("action") or "none"
+            if not data.get("action"):
+                data["action"] = data["deal_action"]
             data.setdefault("notify", False)
             return data
     except json.JSONDecodeError:

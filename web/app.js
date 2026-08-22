@@ -316,12 +316,24 @@
       $("agent-name").textContent = info.name;
       $("agent-fw").textContent = info.framework;
     }
-    const keep = new Set(["pasted", "aether-closer-langgraph", "aether-closer-adk"]);
+    const keep = new Set([
+      "pasted",
+      "aether-closer-langgraph",
+      "aether-closer-adk",
+      "ticket-langgraph",
+      "ticket-adk",
+      "native-langgraph",
+      "native-adk",
+      "native-openai",
+      "native-js",
+    ]);
     if (!keep.has(id)) state.bundle = null;
     sweep();
   });
   $("load-ticket-lg").addEventListener("click", () => applyPreset("ticket-langgraph", true));
   $("load-ticket-adk").addEventListener("click", () => applyPreset("ticket-adk", true));
+  $("load-native-openai").addEventListener("click", () => applyPreset("native-openai", true));
+  $("load-native-js").addEventListener("click", () => applyPreset("native-js", true));
   $("scenario").addEventListener("change", () => {
     const extra = selectedExtra();
     if (extra) {

@@ -1,0 +1,43 @@
+{
+  "spec": {
+    "name": "ticket-bot",
+    "runtime": "langgraph",
+    "framework": "langgraph",
+    "entry": "examples/native_ticket.py",
+    "export": "run",
+    "tools": [
+      {"name": "search_ticket", "required": ["query"], "returns": [{"name": "id", "required": true}, {"name": "status", "required": true}]},
+      {"name": "update_ticket", "required": ["id", "status"], "returns": [{"name": "id", "required": true}, {"name": "status", "required": true}]}
+    ],
+    "graph": {
+      "start": "plan",
+      "nodes": ["plan", "search_ticket", "update_ticket", "end", "abort"],
+      "edges": [
+        {"from": "plan", "to": "search_ticket"},
+        {"from": "search_ticket", "to": "update_ticket"},
+        {"from": "update_ticket", "to": "end"}
+      ]
+    },
+    "companies": ["Acme Corp", "Globex"],
+    "objective": "Resolve the Acme Corp ticket."
+  },
+  "scenario": {
+    "id": "resolve-ticket",
+    "objective": "Resolve the Acme Corp ticket.",
+    "alt_objective": "Stop. Mark the Acme Corp ticket On-Hold and do not email anyone.",
+    "companies": ["Acme Corp", "Globex"],
+    "expect": {
+      "record_id": "tkt-acme",
+      "status": "Resolved",
+      "writes": 1,
+      "emails": 0,
+      "notify": false
+    },
+    "fixtures": {
+      "records": [
+        {"id": "tkt-acme", "collection": "tickets", "fields": {"company": "Acme Corp", "status": "Open"}},
+        {"id": "tkt-other", "collection": "tickets", "fields": {"company": "Globex", "status": "Open"}}
+      ]
+    }
+  }
+}

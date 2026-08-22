@@ -49,18 +49,19 @@ func (c Config) withDefaults() Config {
 	if c.Trials > 400 {
 		c.Trials = 400
 	}
+	if c.Agent == "" {
+		c.Agent = agent.IDCloser
+	}
+	drop := agent.IsDropIn(c.Agent, specOf(c))
 	if len(c.Faults) == 0 {
-		if agent.DropIn(c.Agent) {
+		if drop {
 			c.Faults = append([]fault.Type(nil), fault.All...)
 		} else {
 			c.Faults = append([]fault.Type(nil), fault.MVP...)
 		}
 	}
-	if c.Agent == "" {
-		c.Agent = agent.IDCloser
-	}
 	if c.Scenario == "" {
-		if agent.DropIn(c.Agent) {
+		if drop {
 			c.Scenario = scenario.TicketID
 		} else {
 			c.Scenario = scenario.CloseAcmeID
@@ -331,7 +332,7 @@ func resolveScenario(cfg Config) scenario.Scenario {
 			return b
 		}
 	}
-	if agent.DropIn(cfg.Agent) && (cfg.Scenario == "" || cfg.Scenario == scenario.CloseAcmeID) {
+	if agent.IsDropIn(cfg.Agent, specOf(cfg)) && (cfg.Scenario == "" || cfg.Scenario == scenario.CloseAcmeID) {
 		return scenario.Ticket()
 	}
 	if s, ok := scenario.Lookup(cfg.Scenario); ok {
@@ -414,10 +415,20 @@ func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent
 			g.Model = agent.ScriptedModel{}
 		}
 		return ag, nil
-	case agent.IDCloserLangGraph, agent.IDTicketLangGraph:
-		return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: "langgraph", URL: cfg.RuntimeURL, Spec: spec})
-	case agent.IDCloserADK, agent.IDTicketADK:
+	case agent.IDCloserLangGraph, agent.IDTicketLangGraph, agent.IDNativeLangGraph, agent.IDNativeOpenAI:
+		kind := "langgraph"
+		if spec != nil && (agent.JSRuntime(spec.Runtime) || agent.JSEntry(spec.Entry)) {
+			kind = "js"
+		}
+		return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: kind, URL: cfg.RuntimeURL, Spec: spec})
+	case agent.IDCloserADK, agent.IDTicketADK, agent.IDNativeADK:
 		return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: "adk", URL: cfg.RuntimeURL, Spec: spec})
+	case agent.IDNativeJS:
+		url := cfg.RuntimeURL
+		if spec != nil && spec.Endpoint != "" {
+			url = spec.Endpoint
+		}
+		return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: "js", URL: url, Spec: spec})
 	case agent.IDRemote:
 		url := cfg.RuntimeURL
 		if spec != nil && spec.Endpoint != "" {
@@ -437,6 +448,9 @@ func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent
 			if kind == "" {
 				kind = "langgraph"
 			}
+			if agent.JSRuntime(kind) || agent.JSEntry(spec.Entry) {
+				kind = "js"
+			}
 			return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: kind, URL: cfg.RuntimeURL, Spec: spec})
 		}
 		return nil, fmt.Errorf("unknown agent %q — drop in an entry/endpoint, paste a spec, or pick a catalog id", name)
@@ -446,10 +460,14 @@ func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent
 func hydrateSpec(cfg Config) *agent.Spec {
 	spec := specOf(cfg)
 	switch cfg.Agent {
-	case agent.IDTicketLangGraph:
+	case agent.IDTicketLangGraph, agent.IDNativeLangGraph:
 		spec = overlaySpec(agent.TicketLangGraphSpec(), spec)
-	case agent.IDTicketADK:
+	case agent.IDTicketADK, agent.IDNativeADK:
 		spec = overlaySpec(agent.TicketADKSpec(), spec)
+	case agent.IDNativeOpenAI:
+		spec = overlaySpec(agent.NativeOpenAISpec(), spec)
+	case agent.IDNativeJS:
+		spec = overlaySpec(agent.NativeJSSpec(), spec)
 	}
 	if spec != nil && spec.Entry != "" {
 		cp := *spec
@@ -497,8 +515,8 @@ func overlaySpec(base agent.Spec, over *agent.Spec) *agent.Spec {
 func toolNames(cfg Config) []string {
 	spec := hydrateSpec(cfg)
 	if spec == nil || len(spec.Tools) == 0 {
-		if agent.DropIn(cfg.Agent) {
-			spec = overlaySpec(agent.TicketLangGraphSpec(), nil)
+		if agent.IsDropIn(cfg.Agent, spec) {
+			spec = overlaySpec(agent.TicketLangGraphSpec(), spec)
 		} else {
 			var out []string
 			for _, t := range agent.CRMTools() {

@@ -12,7 +12,7 @@
     <div class="brand">
       <p class="eyebrow">Agent Crucible</p>
       <h1>Torture chamber</h1>
-      <p class="lede">Give it an agent — a LangGraph file, an ADK module, or an HTTP process — and its tool schemas. It runs the same task until the architecture cracks. The runner is deterministic. The model is not invited.</p>
+      <p class="lede">Give it an agent — an unmodified LangGraph, a real ADK module, OpenAI tools, or a Node process — and its tool schemas. The chamber intercepts the tools. The runner is deterministic. The model is not invited.</p>
     </div>
     <div class="agent-chip" id="agent-chip">
       <span class="fw" id="agent-fw">langgraph-go</span>
@@ -31,13 +31,15 @@
     <span class="pill" id="runtime-pill">runtime: —</span>
     <span class="pill" id="ai-pill">ai: local</span>
     <button type="button" id="paste-toggle">Paste agent</button>
-    <button type="button" id="load-ticket-lg">Load ticket LangGraph</button>
-    <button type="button" id="load-ticket-adk">Load ticket ADK</button>
+    <button type="button" id="load-ticket-lg">Load unmodified LangGraph</button>
+    <button type="button" id="load-ticket-adk">Load unmodified ADK</button>
+    <button type="button" id="load-native-openai">Load OpenAI tools</button>
+    <button type="button" id="load-native-js">Load JS agent</button>
     <button type="button" id="gen-scenarios">Generate scenarios</button>
   </section>
   <div class="paste" id="paste-panel" hidden>
     <p class="section-kicker">Drop an agent file, an endpoint, or tool schemas</p>
-    <textarea id="paste-spec" rows="10" placeholder='{"spec":{"name":"ticket-bot","runtime":"langgraph","entry":"examples/ticket_graph.py","tools":[{"name":"search_ticket","required":["query"]},{"name":"update_ticket","required":["id","status"]}]},"scenario":{"objective":"Resolve the Acme Corp ticket.","expect":{"record_id":"tkt-acme","status":"Resolved","writes":1,"emails":0,"notify":false},"fixtures":{"records":[{"id":"tkt-acme","fields":{"company":"Acme Corp","status":"Open"}}]}}}'></textarea>
+    <textarea id="paste-spec" rows="10" placeholder='{"spec":{"name":"ticket-bot","runtime":"langgraph","entry":"examples/native_ticket.py","tools":[{"name":"search_ticket","required":["query"]},{"name":"update_ticket","required":["id","status"]}]},"scenario":{"objective":"Resolve the Acme Corp ticket.","expect":{"record_id":"tkt-acme","status":"Resolved","writes":1,"emails":0,"notify":false},"fixtures":{"records":[{"id":"tkt-acme","fields":{"company":"Acme Corp","status":"Open"}}]}}}'></textarea>
     <div class="paste-actions">
       <button type="button" id="paste-apply">Load into chamber</button>
       <span class="hint" id="paste-hint">The chamber stays on this side of the tools.</span>

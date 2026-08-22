@@ -32,7 +32,7 @@ func Ticket() Scenario {
 		Fixture:        TicketFixture(),
 		ContextBallast: lookalikeBallast("Globex"),
 		StaleMemory: agent.Memory{
-			DealID: "tkt-other", DealStatus: "Open", Amount: 1,
+			DealID: "tkt-other", RecordID: "tkt-other", DealStatus: "Open", Amount: 1,
 			HasWritePerm: true,
 		},
 	}

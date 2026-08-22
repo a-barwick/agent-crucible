@@ -68,28 +68,28 @@ func Write(in Input) Critique {
 			fixes = append(fixes, Fix{Node: writeNode(in), Advice: "Add validation before the write node. Required fields on the write tool must be present or the edge should abort."})
 		case fault.Timeout:
 			paras = append(paras, fmt.Sprintf(
-				"Timeouts (%d trials) completed %s of the time. lookup/fetch retry once, then abort; a timeout on write skips a consistent notify, leaving the world half-done or claiming a write that never landed.",
-				c.N, rate,
+				"Timeouts (%d trials) completed %s of the time. A read retries once or aborts; a timeout on %s skips a consistent follow-up, leaving the world half-done or claiming a write that never landed.",
+				c.N, rate, writeToolPhrase(in),
 			))
-			fixes = append(fixes, Fix{Node: "lookup", Advice: "Retry with backoff and re-enter plan after a terminal timeout. Do not walk notify after a write that never acknowledged."})
+			fixes = append(fixes, Fix{Node: readNode(in), Advice: "Retry with backoff and re-enter plan after a terminal timeout. Do not walk notify after a write that never acknowledged."})
 		case fault.Duplicate:
 			paras = append(paras, fmt.Sprintf(
-				"Duplicate deliveries (%d trials) completed %s of the time. write_deal and send_email are not idempotent, so one duplicated event becomes two side effects.",
-				c.N, rate,
+				"Duplicate deliveries (%d trials) completed %s of the time. %s is not idempotent, so one duplicated event becomes two side effects.",
+				c.N, rate, writeToolPhrase(in),
 			))
-			fixes = append(fixes, Fix{Node: "write", Advice: "Deduplicate by (run_id, tool, args) before any side effect. The notify node needs the same key."})
+			fixes = append(fixes, Fix{Node: writeNode(in), Advice: "Deduplicate by (run_id, tool, args) before any side effect. Notify needs the same key."})
 		case fault.StaleMemory:
 			paras = append(paras, fmt.Sprintf(
-				"Stale memory (%d trials) completed %s of the time. enrich overwrites a fresh get_deal with checkpoint fields, so the write node patches last week's amount or skips live authorization.",
+				"Stale memory (%d trials) completed %s of the time. A fresh read is overwritten with checkpoint fields, so the write node patches last week's record.",
 				c.N, rate,
 			))
-			fixes = append(fixes, Fix{Node: "enrich", Advice: "Treat memory as a cache with a generation. A successful fetch must invalidate it."})
+			fixes = append(fixes, Fix{Node: readNode(in), Advice: "Treat memory as a cache with a generation. A successful fetch must invalidate it."})
 		case fault.Permission:
 			paras = append(paras, fmt.Sprintf(
-				"Missing permission (%d trials) completed %s of the time. write treats 403 as a finished node and still walks notify, so the AE gets a close email for a deal that never moved.",
-				c.N, rate,
+				"Missing permission (%d trials) completed %s of the time. %s treats 403 as a finished node, so the graph continues as if the write landed.",
+				c.N, rate, writeToolPhrase(in),
 			))
-			fixes = append(fixes, Fix{Node: "authorize", Advice: "Gate the write node on a live permission edge. A 403 is a hard stop, not a transport success."})
+			fixes = append(fixes, Fix{Node: writeNode(in), Advice: "Gate the write on a live permission edge. A 403 is a hard stop, not a transport success."})
 		case fault.ObjectiveChange:
 			paras = append(paras, fmt.Sprintf(
 				"The user changed the objective mid-run (%d trials) and the agent completed the new request %s of the time. plan never runs twice, so Closed-Won plus an email still fire after a cancel.",
@@ -200,6 +200,15 @@ func writeNode(in Input) string {
 		}
 	}
 	return "write"
+}
+
+func readNode(in Input) string {
+	for _, t := range in.Tools {
+		if t != "" && !containsAny(t, "write", "update", "patch", "email", "notify", "permission") {
+			return t
+		}
+	}
+	return "lookup"
 }
 
 func containsAny(s string, parts ...string) bool {

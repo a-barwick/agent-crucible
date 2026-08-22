@@ -52,8 +52,8 @@ func usage() {
 Usage:
   crucible serve     [-addr :8080]
   crucible run       [-seed 42] [-trials 40] [-p 0.3] [-agent aether-closer] [-scenario close-acme]
-                     [-entry examples/ticket_graph.py] [-endpoint http://127.0.0.1:8092]
-                     [-spec examples/ticket.json] [-faults all] [-json]
+                     [-entry examples/native_ticket.py] [-endpoint http://127.0.0.1:8092]
+                     [-spec examples/native_ticket.json] [-faults all] [-json]
   crucible replay    [-seed 42] [-trial 0] [-p 0.3] [-agent ...] [-scenario ...] [-json]
   crucible agents
   crucible scenarios
@@ -87,7 +87,7 @@ func serveCmd(args []string) {
 func runCmd(args []string) {
 	cfg, asJSON := flags(args, false)
 	timeout := 30 * time.Second
-	if agent.NeedsPython(cfg.Agent, cfg.Spec) {
+	if agent.NeedsPython(cfg.Agent, cfg.Spec) || agent.NeedsNode(cfg.Agent, cfg.Spec) {
 		timeout = 120 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -199,13 +199,23 @@ func attachDropIn(cfg harness.Config, specFile, entry, endpoint string) harness.
 		}
 	}
 	if entry != "" {
+		rt := "langgraph"
+		if agent.JSEntry(entry) {
+			rt = "js"
+		}
 		if cfg.Bundle != nil {
 			cfg.Bundle.Spec.Entry = entry
+			if cfg.Bundle.Spec.Runtime == "" {
+				cfg.Bundle.Spec.Runtime = rt
+			}
 		} else {
-			spec := agent.Spec{Entry: entry, Runtime: "langgraph"}
+			spec := agent.Spec{Entry: entry, Runtime: rt}
 			if cfg.Spec != nil {
 				spec = *cfg.Spec
 				spec.Entry = entry
+				if spec.Runtime == "" {
+					spec.Runtime = rt
+				}
 			}
 			cfg.Spec = &spec
 		}
@@ -231,7 +241,7 @@ func attachDropIn(cfg harness.Config, specFile, entry, endpoint string) harness.
 
 func agentsCmd() {
 	st := runtime.CurrentStatus()
-	for _, a := range agent.Catalog(st.Ready || runtime.HaveLangGraph()) {
+	for _, a := range agent.Catalog(st.Ready || runtime.HaveLangGraph(), runtime.HaveNode()) {
 		mark := " "
 		if a.Available || a.Runtime == "in-process" || a.Runtime == "spec" {
 			mark = "*"

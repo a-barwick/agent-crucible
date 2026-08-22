@@ -67,7 +67,7 @@ func (a *Generic) Run(ctx context.Context, st State, bus Bus, rec *trace.Recorde
 	if st.ThreadID == "" {
 		st.ThreadID = "pasted"
 	}
-	if st.Intent.Company == "" && st.Objective != "" {
+	if st.Intent.EntityName() == "" && st.Objective != "" {
 		st.Intent = ParseIntentWith(st.Objective, st.Companies)
 	}
 	nodes := map[string]NodeFunc{}
@@ -191,7 +191,7 @@ func hijackReadArgs(st *State, tool string, args map[string]any, rec *trace.Reco
 		return
 	}
 	hijack := lastCompany(st.Junk, st.Companies)
-	if hijack == "" || hijack == st.Intent.Company {
+	if hijack == "" || hijack == st.Intent.EntityName() {
 		return
 	}
 	changed := false
@@ -210,17 +210,18 @@ func overwriteFromMemory(st *State, tool string, rec *trace.Recorder) {
 	if schema.IsWriteLike(tool) || schema.IsEmailLike(tool) || schema.IsPermissionLike(tool) {
 		return
 	}
-	if st.Memory.DealID == "" {
+	id := st.Memory.TargetID()
+	if id == "" {
 		return
 	}
-	st.DealID = st.Memory.DealID
+	st.DealID = id
 	if st.Memory.DealStatus != "" {
 		st.Status = st.Memory.DealStatus
 	}
 	if st.Memory.Amount != 0 {
 		st.Amount = st.Memory.Amount
 	}
-	rec.State("enrich trusted stale memory", map[string]any{"deal_id": st.DealID, "tool": tool})
+	rec.State("enrich trusted stale memory", map[string]any{"deal_id": st.DealID, "record_id": id, "tool": tool})
 }
 
 func inferBind(name string, spec Spec) NodeBinding {
@@ -269,7 +270,7 @@ func inferArgs(st *State, tool string, spec Spec) map[string]any {
 		}
 	}
 	if schema.IsWriteLike(tool) {
-		if s := ActionStatus(st.Intent.DealAction); s != "" {
+		if s := ActionStatus(st.Intent.ActionName()); s != "" {
 			if _, exists := args["status"]; !exists || schema.StringField(args, "status") == "" {
 				args["status"] = s
 			}
@@ -293,9 +294,9 @@ func defaultArgNames(tool string) []string {
 
 func argFromState(st *State, name string, kind schema.Kind) (any, bool) {
 	switch name {
-	case "company", "query", "name", "title":
-		if st.Intent.Company != "" {
-			return st.Intent.Company, true
+	case "company", "query", "name", "title", "entity":
+		if st.Intent.EntityName() != "" {
+			return st.Intent.EntityName(), true
 		}
 	case "id", "record_id", "ticket_id", "deal_id":
 		if st.DealID != "" {
@@ -307,7 +308,7 @@ func argFromState(st *State, name string, kind schema.Kind) (any, bool) {
 		}
 	case "status":
 		if kind == schema.KindWrite {
-			if s := ActionStatus(st.Intent.DealAction); s != "" {
+			if s := ActionStatus(st.Intent.ActionName()); s != "" {
 				return s, true
 			}
 		}
@@ -331,7 +332,7 @@ func argFromState(st *State, name string, kind schema.Kind) (any, bool) {
 			return st.CloseDate, true
 		}
 	case "subject":
-		return "update: " + st.Intent.Company, true
+		return "update: " + st.Intent.EntityName(), true
 	case "body", "text":
 		return "deal=" + st.DealID + " status=" + st.Status, true
 	}
@@ -362,8 +363,8 @@ func applySaves(st *State, data map[string]any, save map[string]string) {
 
 func stateValue(st *State, path string) any {
 	switch path {
-	case "intent.company", "company", "query", "name":
-		return st.Intent.Company
+	case "intent.company", "intent.entity", "company", "entity", "query", "name":
+		return st.Intent.EntityName()
 	case "contact_id":
 		return st.ContactID
 	case "deal_id", "id", "record_id", "ticket_id":
