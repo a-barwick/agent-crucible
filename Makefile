@@ -1,4 +1,4 @@
-.PHONY: test run serve replay fmt vet
+.PHONY: test run serve replay fmt vet runtime
 
 BIN := crucible
 
@@ -8,8 +8,12 @@ fmt:
 vet:
 	go vet ./...
 
+runtime:
+	python3 -m pip install -r runtime/requirements.txt
+
 test:
 	go test ./...
+	PYTHONPATH=runtime python3 -m crucible_rt smoke
 
 build:
 	go build -o $(BIN) ./cmd/crucible

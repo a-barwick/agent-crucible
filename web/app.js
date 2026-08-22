@@ -7,6 +7,8 @@
     p: 0,
     selected: 0,
     enabled: new Set(),
+    bundle: null,
+    extraScenarios: [],
   };
 
   const heatWord = (p) => {
@@ -21,11 +23,34 @@
     const res = await fetch("/api/meta");
     state.meta = await res.json();
     $("agent-name").textContent = state.meta.agent.name;
+    $("agent-fw").textContent = state.meta.agent.framework || "langgraph-go";
     $("agent-task").textContent = "Close Acme · email the AE";
     const defaults = state.meta.defaults.faults || [];
     state.enabled = new Set(defaults);
+    fillSelect($("agent"), state.meta.agents || [], "id", "id", state.meta.defaults.agent);
+    fillScenarios();
+    const rt = state.meta.runtime || {};
+    $("runtime-pill").textContent = rt.ready ? "runtime: up · langgraph" : "runtime: go only";
+    $("ai-pill").textContent = "ai: " + ((state.meta.ai && state.meta.ai.provider) || "local");
     renderFaults();
     drawGraph(state.meta.agent.graph.nodes, [], []);
+  }
+
+  function fillSelect(sel, items, valueKey, labelKey, current) {
+    sel.innerHTML = "";
+    for (const it of items) {
+      const opt = document.createElement("option");
+      opt.value = it[valueKey];
+      opt.textContent = it[labelKey] + (it.framework ? " · " + it.framework : "");
+      if (it.available === false && it.runtime === "python") opt.textContent += " (start serve)";
+      sel.append(opt);
+    }
+    if (current) sel.value = current;
+  }
+
+  function fillScenarios() {
+    const items = [...(state.meta.scenarios || []), ...state.extraScenarios];
+    fillSelect($("scenario"), items, "id", "name", state.meta.defaults.scenario);
   }
 
   function renderFaults() {
@@ -174,13 +199,17 @@
   }
 
   function payload() {
-    return {
+    const body = {
       seed: Number($("seed").value) || 42,
       trials: Number($("trials").value) || 40,
       faults: [...state.enabled],
       max_p: 0.3,
       step: 0.01,
+      agent: $("agent").value,
+      scenario: $("scenario").value,
     };
+    if (state.bundle) body.bundle = state.bundle;
+    return body;
   }
 
   async function sweep() {
@@ -213,6 +242,54 @@
   $("resweep").addEventListener("click", sweep);
   $("seed").addEventListener("change", sweep);
   $("trials").addEventListener("change", sweep);
+  $("agent").addEventListener("change", () => {
+    const info = (state.meta.agents || []).find((a) => a.id === $("agent").value);
+    if (info) {
+      $("agent-name").textContent = info.name;
+      $("agent-fw").textContent = info.framework;
+    }
+    if ($("agent").value !== "pasted") state.bundle = null;
+    sweep();
+  });
+  $("scenario").addEventListener("change", () => {
+    const items = [...(state.meta.scenarios || []), ...state.extraScenarios];
+    const sc = items.find((s) => s.id === $("scenario").value);
+    if (sc) $("agent-task").textContent = sc.name;
+    sweep();
+  });
+  $("paste-toggle").addEventListener("click", () => {
+    $("paste-panel").hidden = !$("paste-panel").hidden;
+  });
+  $("paste-apply").addEventListener("click", () => {
+    try {
+      const raw = JSON.parse($("paste-spec").value);
+      state.bundle = raw.spec ? raw : { spec: raw, scenario: raw.scenario || {} };
+      $("agent").value = "pasted";
+      $("agent-name").textContent = (state.bundle.spec && state.bundle.spec.name) || "pasted";
+      $("agent-fw").textContent = (state.bundle.spec && state.bundle.spec.framework) || "generic";
+      $("paste-hint").textContent = "Loaded. Recasting…";
+      sweep();
+    } catch (err) {
+      $("paste-hint").textContent = "Invalid JSON: " + err.message;
+    }
+  });
+  $("gen-scenarios").addEventListener("click", async () => {
+    $("gen-scenarios").disabled = true;
+    try {
+      const res = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ seed: Number($("seed").value) || 42, n: 5 }),
+      });
+      const drafts = await res.json();
+      state.extraScenarios = (drafts || []).map((d) => ({
+        id: d.id, name: (d.source || "gen") + ": " + d.name, objective: d.objective,
+      }));
+      fillScenarios();
+    } finally {
+      $("gen-scenarios").disabled = false;
+    }
+  });
 
   loadMeta().then(sweep).catch((err) => {
     $("headline").textContent = "Could not reach the runner: " + err.message;

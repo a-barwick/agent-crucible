@@ -15,11 +15,32 @@
       <p class="lede">Give it a graph and its tool schemas. It runs the same task until the architecture cracks. The runner is deterministic. The model is not invited.</p>
     </div>
     <div class="agent-chip" id="agent-chip">
-      <span class="fw">langgraph</span>
+      <span class="fw" id="agent-fw">langgraph-go</span>
       <strong id="agent-name">aether-closer</strong>
       <span id="agent-task">Close Acme · email the AE</span>
     </div>
   </header>
+
+  <section class="chamber" aria-label="Agent and scenario">
+    <label>agent
+      <select id="agent"></select>
+    </label>
+    <label>scenario
+      <select id="scenario"></select>
+    </label>
+    <span class="pill" id="runtime-pill">runtime: —</span>
+    <span class="pill" id="ai-pill">ai: local</span>
+    <button type="button" id="paste-toggle">Paste agent</button>
+    <button type="button" id="gen-scenarios">Generate scenarios</button>
+  </section>
+  <div class="paste" id="paste-panel" hidden>
+    <p class="section-kicker">Drop tool schemas and a graph</p>
+    <textarea id="paste-spec" rows="10" placeholder='{"spec":{"name":"my-closer","framework":"generic","tools":[],"graph":{"start":"plan","nodes":[],"edges":[]}},"scenario":{"id":"pasted","objective":"…","expect":{}}}'></textarea>
+    <div class="paste-actions">
+      <button type="button" id="paste-apply">Load into chamber</button>
+      <span class="hint" id="paste-hint">The chamber stays on this side of the tools.</span>
+    </div>
+  </div>
 
   <section class="forge" aria-label="Failure probability">
     <div class="forge-copy">
@@ -52,6 +73,7 @@
       <p class="sub" id="survival-sub">waiting for the first pour</p>
       <ol class="counts" id="counts"></ol>
       <div class="curve" id="curve" aria-hidden="true"></div>
+    </article>
     <article class="tiles-wrap">
       <p class="section-kicker">Ensemble <span id="tile-caption">trial 0–39</span></p>
       <div class="tiles" id="tiles" role="list"></div>

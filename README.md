@@ -6,22 +6,48 @@ You give it an agent and its tool schemas. It runs the same task over and over w
 
 > The agent completed 87% of normal runs but only 31% when the CRM tool returned a successful response with missing fields. The graph treats semantic failure as transport success. Add validation before the write node.
 
-The AI is not the test runner. The runner is deterministic — seeded, replayable, fast enough to scrub. A model can generate scenarios, score ambiguous traces, or narrate the critique. It does not pick faults.
+The AI is not the test runner. The runner is deterministic — seeded, replayable, fast enough to scrub. A model generates scenarios, scores ambiguous traces, and explains systemic patterns. It does not pick faults.
 
-## Weekend MVP
+## What you can drop in
 
-- One sample LangGraph-shaped agent (`aether-closer`)
-- Five fault types on the slider, nine in the catalog
-- Seeded replay (`crucible replay -seed 42 -trial 7`)
-- A visual timeline
+| Agent id | Runtime | What it actually is |
+| --- | --- | --- |
+| `aether-closer` | in-process Go | Fast slider twin: nodes, `MemorySaver`, invoked planner |
+| `aether-closer-langgraph` | Python | Real `langgraph.StateGraph` compiled with `InMemorySaver`. Plan calls a LangChain chat model |
+| `aether-closer-adk` | Python | ADK adapter: `Agent` + `Runner` + `SessionService`. Tools callback into the chamber |
+| `pasted` | spec | Paste tool schemas + a graph JSON. Optional fixtures and expect |
 
-**Demo:** drag *tool failure probability* from 0% to 30% and watch a production-shaped closer collapse. The ensemble is fixed. Raising `p` only adds faults; it does not reshuffle the trials.
+The chamber stays on this side of the tools. Sidecars never touch the world; they HTTP-callback into `FaultBus`.
+
+## Scenario library
+
+Not one Acme close. Built-in tasks:
+
+- `close-acme` — Closed-Won + email the AE (demo default)
+- `cancel-acme` — On-Hold, no email
+- `renew-supplies` — other company, lookalike ballast
+- `refund-acme` — write Refunded, stay quiet
+- `close-quiet` — Closed-Won, do not email
+
+`crucible generate` (and the UI button) adds more from the tool schemas. With `OPENAI_API_KEY` / `CRUCIBLE_AI_API_KEY` a model writes extras; without it the local evaluator still produces the library.
+
+## Demo
 
 ```bash
+python3 -m pip install -r runtime/requirements.txt   # LangGraph sidecar
 go run ./cmd/crucible serve -addr :8080
 ```
 
-Open http://localhost:8080.
+Open http://localhost:8080. Drag *tool failure probability* from 0% to 30%. Switch agent to `aether-closer-langgraph` or paste a spec. The ensemble is fixed: raising `p` only adds faults.
+
+```bash
+crucible run -seed 42 -trials 40 -p 0.3
+crucible run -agent aether-closer-langgraph -scenario refund-acme -p 0.2
+crucible replay -seed 42 -trial 7 -p 0.3
+crucible agents
+crucible scenarios
+crucible generate -n 5
+```
 
 ## Faults
 
@@ -43,10 +69,10 @@ The sample agent does none of those things on purpose. It is the patient.
 
 ```
 seed + trial  →  rng stream  →  fault decisions (u < p)
-                              →  LangGraph stand-in
-                              →  instrumented CRM world
-                              →  rule judge
-                              →  clusters + critique
+                              →  agent (Go | LangGraph | ADK | pasted spec)
+                              →  tool callback → instrumented world
+                              →  rule judge (+ model if ambiguous)
+                              →  clusters + evidence-based critique
 ```
 
 Every decision site draws the same number of random values regardless of `p`. A trial that first breaks at 18% stays broken at 30%. The tiles flip in place.
@@ -58,15 +84,15 @@ The judge is rules, not a model:
 - **aborted** — stopped short, world left clean
 - **failed** — incomplete write, false success, duplicate side effect, email without a write, cancelled close still sent
 
-## CLI
+Ambiguous traces (claimed success, world unfinished, no unsafe mutation) go to the evaluator. The critique is mined from trace evidence (`write accepted empty success payload`), not from a switch on fault type. A live model can rewrite the headline when an API key is set.
 
-```bash
-crucible serve  -addr :8080
-crucible run    -seed 42 -trials 40 -p 0.3
-crucible replay -seed 42 -trial 7 -p 0.3
-```
+## Bring your own agent
 
-`--faults timeout,malformed,duplicate,stale_memory,permission` selects the injection set. Empty means the five MVP faults.
+1. **Paste** a JSON bundle in the UI (`spec.tools`, `spec.graph`, optional `scenario.fixtures` / `expect`).
+2. **Implement** `agent.Agent` in-process.
+3. **Speak the protocol**: `POST /v1/run` with `{callback, token, objective, thread_id}`. Call `POST {callback}/tool` and `POST {callback}/before_node`. LangGraph and ADK sidecars are two implementations.
+
+Set `CRUCIBLE_RUNTIME` if the `runtime/` tree is not next to the binary. Planner model: `CRUCIBLE_AGENT_MODEL=scripted` (default) or a live OpenAI-compatible key.
 
 ## Layout
 
@@ -74,13 +100,15 @@ crucible replay -seed 42 -trial 7 -p 0.3
 cmd/crucible/          CLI + HTTP entry
 internal/harness/      seeded suite + sweep runner
 internal/fault/        injection, independent of p
-internal/agent/        LangGraph runtime + aether-closer
-internal/world/        in-memory CRM
+internal/agent/        interfaces, MemorySaver, planner, CRM + generic
+internal/runtime/      Python sidecar client + localhost tool callback
+internal/scenario/     task library
+internal/ai/           generate / evaluate / explain
+internal/world/        in-memory CRM + pasteable fixtures
 internal/judge/        deterministic recovery rules
 internal/cluster/      failure fingerprints
-internal/critique/     architecture notes from the numbers
-internal/server/       /api/meta /api/run /api/sweep /api/replay
+internal/critique/     critique types
+internal/server/       /api/meta /api/run /api/sweep /api/replay /api/generate
+runtime/crucible_rt/   LangGraph StateGraph + ADK adapter
 web/                   timeline UI
 ```
-
-Bring your own graph later by implementing `agent.Agent` and putting a real world behind `agent.Bus`. The chamber stays on this side of the tools.

@@ -10,8 +10,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/a-barwick/agent-crucible/internal/agent"
+	"github.com/a-barwick/agent-crucible/internal/ai"
 	"github.com/a-barwick/agent-crucible/internal/fault"
 	"github.com/a-barwick/agent-crucible/internal/harness"
+	"github.com/a-barwick/agent-crucible/internal/runtime"
+	"github.com/a-barwick/agent-crucible/internal/scenario"
 	"github.com/a-barwick/agent-crucible/internal/server"
 )
 
@@ -27,6 +31,12 @@ func main() {
 		runCmd(os.Args[2:])
 	case "replay":
 		replayCmd(os.Args[2:])
+	case "agents":
+		agentsCmd()
+	case "scenarios":
+		scenariosCmd()
+	case "generate":
+		generateCmd(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -40,11 +50,15 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `crucible — a torture chamber for tool-using agents
 
 Usage:
-  crucible serve  [-addr :8080]
-  crucible run    [-seed 42] [-trials 40] [-p 0.3] [-faults timeout,malformed,...] [-json]
-  crucible replay [-seed 42] [-trial 0] [-p 0.3] [-faults ...] [-json]
+  crucible serve     [-addr :8080]
+  crucible run       [-seed 42] [-trials 40] [-p 0.3] [-agent aether-closer] [-scenario close-acme] [-faults ...] [-json]
+  crucible replay    [-seed 42] [-trial 0] [-p 0.3] [-agent ...] [-scenario ...] [-json]
+  crucible agents
+  crucible scenarios
+  crucible generate  [-n 5] [-json]
 
 The runner is deterministic. Same seed, trial, p, and fault set replay bit-for-bit.
+AI generates scenarios, scores ambiguous traces, and explains patterns. It does not pick faults.
 `)
 }
 
@@ -52,6 +66,12 @@ func serveCmd(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", ":8080", "listen address")
 	_ = fs.Parse(args)
+	if rt, err := runtime.EnsureLocal(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "python runtime: %v (langgraph/adk agents unavailable)\n", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "python runtime %s\n", rt.URL)
+		defer rt.Stop()
+	}
 	h := server.New()
 	s := &http.Server{Addr: *addr, Handler: h, ReadHeaderTimeout: 5 * time.Second}
 	fmt.Fprintf(os.Stderr, "crucible listening on %s\n", *addr)
@@ -100,9 +120,11 @@ func replayCmd(args []string) {
 	n := fs.Int("trial", 0, "trial index")
 	p := fs.Float64("p", 0.30, "failure probability")
 	faults := fs.String("faults", "", "comma-separated fault types")
+	ag := fs.String("agent", agent.IDCloser, "agent id")
+	scn := fs.String("scenario", scenario.CloseAcmeID, "scenario id")
 	asJSON := fs.Bool("json", false, "print JSON")
 	_ = fs.Parse(args)
-	cfg := harness.Config{Seed: *seed, Trials: *trials, P: *p, Faults: parseFaults(*faults)}
+	cfg := harness.Config{Seed: *seed, Trials: *trials, P: *p, Faults: parseFaults(*faults), Agent: *ag, Scenario: *scn}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	tr := harness.Replay(ctx, cfg, *n)
@@ -135,9 +157,48 @@ func flags(args []string, _ bool) (harness.Config, bool) {
 	trials := fs.Int("trials", 40, "trial count")
 	p := fs.Float64("p", 0.30, "tool failure probability")
 	faults := fs.String("faults", "", "comma-separated fault types (default: MVP five)")
+	ag := fs.String("agent", agent.IDCloser, "agent id (aether-closer, aether-closer-langgraph, aether-closer-adk, pasted)")
+	scn := fs.String("scenario", scenario.CloseAcmeID, "scenario id")
 	asJSON := fs.Bool("json", false, "print JSON")
 	_ = fs.Parse(args)
-	return harness.Config{Seed: *seed, Trials: *trials, P: *p, Faults: parseFaults(*faults)}, *asJSON
+	return harness.Config{Seed: *seed, Trials: *trials, P: *p, Faults: parseFaults(*faults), Agent: *ag, Scenario: *scn}, *asJSON
+}
+
+func agentsCmd() {
+	st := runtime.CurrentStatus()
+	for _, a := range agent.Catalog(st.Ready || runtime.HaveLangGraph()) {
+		mark := " "
+		if a.Available || a.Runtime == "in-process" || a.Runtime == "spec" {
+			mark = "*"
+		}
+		fmt.Printf("%s %-24s %-14s %s\n", mark, a.ID, a.Framework, a.Description)
+	}
+}
+
+func scenariosCmd() {
+	for _, s := range scenario.Summaries() {
+		fmt.Printf("%-16s  %s\n    %s\n", s.ID, s.Name, s.Objective)
+	}
+}
+
+func generateCmd(args []string) {
+	fs := flag.NewFlagSet("generate", flag.ExitOnError)
+	n := fs.Int("n", 5, "how many")
+	seed := fs.Int64("seed", 42, "seed")
+	asJSON := fs.Bool("json", false, "print JSON")
+	_ = fs.Parse(args)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out := ai.Generate(ctx, *seed, agent.CRMTools(), *n, ai.FromEnv(ai.Config{}))
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(out)
+		return
+	}
+	for _, d := range out {
+		fmt.Printf("%s [%s] %s\n  %s\n", d.ID, d.Source, d.Name, d.Objective)
+	}
 }
 
 func parseFaults(s string) []fault.Type {

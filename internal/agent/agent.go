@@ -9,13 +9,26 @@ import (
 )
 
 // Spec is what the UI and the runner know about an agent without running it.
+// Paste a Spec (tools + graph) to drop an arbitrary tool-using agent into the chamber.
 type Spec struct {
-	Name        string        `json:"name"`
-	Framework   string        `json:"framework"`
-	Description string        `json:"description"`
-	Tools       []schema.Tool `json:"tools"`
-	Graph       GraphSpec     `json:"graph"`
-	Bugs        []Bug         `json:"bugs"`
+	Name        string                 `json:"name"`
+	Framework   string                 `json:"framework"`
+	Runtime     string                 `json:"runtime,omitempty"` // go | langgraph | adk
+	Description string                 `json:"description"`
+	Tools       []schema.Tool          `json:"tools"`
+	Graph       GraphSpec              `json:"graph"`
+	NodeTools   map[string]NodeBinding `json:"node_tools,omitempty"`
+	Companies   []string               `json:"companies,omitempty"`
+	Objective   string                 `json:"objective,omitempty"`
+	Bugs        []Bug                  `json:"bugs"`
+}
+
+// NodeBinding tells the generic runner what a named node does.
+type NodeBinding struct {
+	Kind     string            `json:"kind"` // plan|lookup|fetch|enrich|authorize|write|notify|tool
+	Tool     string            `json:"tool,omitempty"`
+	ArgsFrom map[string]string `json:"args_from,omitempty"`
+	Save     map[string]string `json:"save,omitempty"`
 }
 
 type Bug struct {
@@ -88,6 +101,9 @@ type State struct {
 	LastError string
 	History   []string
 	Junk      string // context-pressure ballast
+	ThreadID  string
+	Companies []string
+	Partial   bool
 }
 
 // Bus is how the agent reaches tools. The harness wraps the world with faults.

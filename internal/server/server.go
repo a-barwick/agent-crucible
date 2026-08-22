@@ -8,8 +8,12 @@ import (
 	"time"
 
 	"github.com/a-barwick/agent-crucible/internal/agent"
+	"github.com/a-barwick/agent-crucible/internal/ai"
 	"github.com/a-barwick/agent-crucible/internal/fault"
 	"github.com/a-barwick/agent-crucible/internal/harness"
+	"github.com/a-barwick/agent-crucible/internal/runtime"
+	"github.com/a-barwick/agent-crucible/internal/scenario"
+	"github.com/a-barwick/agent-crucible/internal/schema"
 	"github.com/a-barwick/agent-crucible/web"
 )
 
@@ -22,6 +26,7 @@ func New() http.Handler {
 	mux.HandleFunc("POST /api/run", handleRun)
 	mux.HandleFunc("POST /api/sweep", handleSweep)
 	mux.HandleFunc("POST /api/replay", handleReplay)
+	mux.HandleFunc("POST /api/generate", handleGenerate)
 
 	static, err := fs.Sub(web.FS, ".")
 	if err != nil {
@@ -32,30 +37,46 @@ func New() http.Handler {
 }
 
 func handleMeta(w http.ResponseWriter, _ *http.Request) {
+	rt := runtime.CurrentStatus()
 	crm := agent.NewCRM(nil)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"agent":  crm.Spec(),
-		"faults": fault.Catalog(),
+		"agent":     crm.Spec(),
+		"agents":    agent.Catalog(rt.Ready),
+		"scenarios": scenario.Summaries(),
+		"faults":    fault.Catalog(),
+		"runtime":   rt,
+		"ai":        ai.StatusFromEnv(),
 		"defaults": map[string]any{
 			"seed": 42, "trials": 40, "p": 0, "p_max": 0.30, "step": 0.01,
 			"faults":    fault.MVP,
 			"objective": agent.DefaultObjective,
+			"agent":     agent.IDCloser,
+			"scenario":  scenario.CloseAcmeID,
 		},
 	})
 }
 
 type runReq struct {
-	Seed   int64        `json:"seed"`
-	Trials int          `json:"trials"`
-	P      float64      `json:"p"`
-	Faults []fault.Type `json:"faults"`
-	MaxP   float64      `json:"max_p"`
-	Step   float64      `json:"step"`
-	Trial  int          `json:"trial"`
+	Seed       int64            `json:"seed"`
+	Trials     int              `json:"trials"`
+	P          float64          `json:"p"`
+	Faults     []fault.Type     `json:"faults"`
+	MaxP       float64          `json:"max_p"`
+	Step       float64          `json:"step"`
+	Trial      int              `json:"trial"`
+	Agent      string           `json:"agent"`
+	Scenario   string           `json:"scenario"`
+	Spec       *agent.Spec      `json:"spec"`
+	Bundle     *scenario.Bundle `json:"bundle"`
+	RuntimeURL string           `json:"runtime_url"`
 }
 
 func cfgOf(r runReq) harness.Config {
-	return harness.Config{Seed: r.Seed, Trials: r.Trials, P: r.P, Faults: r.Faults}
+	return harness.Config{
+		Seed: r.Seed, Trials: r.Trials, P: r.P, Faults: r.Faults,
+		Agent: r.Agent, Scenario: r.Scenario, Spec: r.Spec,
+		Bundle: r.Bundle, RuntimeURL: r.RuntimeURL,
+	}
 }
 
 func handleRun(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +84,7 @@ func handleRun(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	writeJSON(w, http.StatusOK, harness.Run(ctx, cfgOf(req)))
 }
@@ -81,7 +102,14 @@ func handleSweep(w http.ResponseWriter, r *http.Request) {
 	if step == 0 {
 		step = 0.01
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	if agent.NeedsPython(req.Agent, req.Spec) && step < 0.05 {
+		step = 0.05
+	}
+	timeout := 30 * time.Second
+	if agent.NeedsPython(req.Agent, req.Spec) {
+		timeout = 120 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 	writeJSON(w, http.StatusOK, harness.RunSweep(ctx, cfgOf(req), maxP, step))
 }
@@ -91,9 +119,27 @@ func handleReplay(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	writeJSON(w, http.StatusOK, harness.Replay(ctx, cfgOf(req), req.Trial))
+}
+
+func handleGenerate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Seed  int64         `json:"seed"`
+		N     int           `json:"n"`
+		Tools []schema.Tool `json:"tools"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if len(req.Tools) == 0 {
+		req.Tools = agent.CRMTools()
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	writeJSON(w, http.StatusOK, ai.Generate(ctx, req.Seed, req.Tools, req.N, ai.FromEnv(ai.Config{})))
 }
 
 func readReq(w http.ResponseWriter, r *http.Request) (runReq, bool) {

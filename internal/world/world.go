@@ -53,6 +53,54 @@ type World struct {
 	UnauthorizedAttempts int
 }
 
+// Fixture is a dumpable world the user can paste alongside tool schemas.
+type Fixture struct {
+	Actor    string              `json:"actor,omitempty"`
+	Contacts []Contact           `json:"contacts"`
+	Deals    []Deal              `json:"deals"`
+	ACL      map[string][]string `json:"acl,omitempty"`
+}
+
+func SeedFixture(f Fixture) *World {
+	w := &World{
+		Actor:    f.Actor,
+		Contacts: make(map[string]Contact, len(f.Contacts)),
+		Deals:    make(map[string]Deal, len(f.Deals)),
+		ACL:      map[string][]string{},
+	}
+	if w.Actor == "" {
+		w.Actor = "agent-bot"
+	}
+	for _, c := range f.Contacts {
+		w.Contacts[c.ID] = c
+	}
+	for _, d := range f.Deals {
+		w.Deals[d.ID] = d
+	}
+	if len(f.ACL) == 0 {
+		w.ACL[w.Actor] = []string{PermRead, PermWrite}
+	} else {
+		for k, v := range f.ACL {
+			w.ACL[k] = append([]string(nil), v...)
+		}
+	}
+	return w
+}
+
+func CloseAcmeFixture() Fixture {
+	return Fixture{
+		Actor: "agent-bot",
+		Contacts: []Contact{
+			{ID: "ct-acme", Company: "Acme Corp", Email: "ada@acme.example", AE: "jordan@vendor.example"},
+			{ID: "ct-acme-supplies", Company: "Acme Supplies", Email: "ops@supplies.example", AE: "pat@vendor.example"},
+		},
+		Deals: []Deal{
+			{ID: "deal-acme-1", ContactID: "ct-acme", Status: "Negotiation", Amount: 48000, CloseDate: "2026-09-01", OwnerID: "owner-jordan"},
+			{ID: "deal-supplies-1", ContactID: "ct-acme-supplies", Status: "Qualified", Amount: 1200, CloseDate: "2026-12-15", OwnerID: "owner-pat"},
+		},
+	}
+}
+
 // SeedCloseAcme is the weekend-MVP fixture: one real deal, one lookalike company.
 func SeedCloseAcme() *World {
 	return &World{

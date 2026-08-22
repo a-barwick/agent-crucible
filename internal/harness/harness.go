@@ -10,14 +10,16 @@ import (
 	"math"
 
 	"github.com/a-barwick/agent-crucible/internal/agent"
+	"github.com/a-barwick/agent-crucible/internal/ai"
 	"github.com/a-barwick/agent-crucible/internal/clock"
 	"github.com/a-barwick/agent-crucible/internal/cluster"
 	"github.com/a-barwick/agent-crucible/internal/critique"
 	"github.com/a-barwick/agent-crucible/internal/fault"
 	"github.com/a-barwick/agent-crucible/internal/judge"
 	"github.com/a-barwick/agent-crucible/internal/rng"
+	"github.com/a-barwick/agent-crucible/internal/runtime"
+	"github.com/a-barwick/agent-crucible/internal/scenario"
 	"github.com/a-barwick/agent-crucible/internal/trace"
-	"github.com/a-barwick/agent-crucible/internal/world"
 )
 
 const (
@@ -26,11 +28,16 @@ const (
 )
 
 type Config struct {
-	Seed     int64        `json:"seed"`
-	Trials   int          `json:"trials"`
-	P        float64      `json:"p"`
-	Faults   []fault.Type `json:"faults"`
-	Scenario string       `json:"scenario,omitempty"`
+	Seed       int64            `json:"seed"`
+	Trials     int              `json:"trials"`
+	P          float64          `json:"p"`
+	Faults     []fault.Type     `json:"faults"`
+	Scenario   string           `json:"scenario,omitempty"`
+	Agent      string           `json:"agent,omitempty"`
+	Spec       *agent.Spec      `json:"spec,omitempty"`
+	Bundle     *scenario.Bundle `json:"bundle,omitempty"`
+	RuntimeURL string           `json:"runtime_url,omitempty"`
+	AI         ai.Config        `json:"ai,omitempty"`
 }
 
 func (c Config) withDefaults() Config {
@@ -42,6 +49,12 @@ func (c Config) withDefaults() Config {
 	}
 	if len(c.Faults) == 0 {
 		c.Faults = append([]fault.Type(nil), fault.MVP...)
+	}
+	if c.Agent == "" {
+		c.Agent = agent.IDCloser
+	}
+	if c.Scenario == "" {
+		c.Scenario = scenario.CloseAcmeID
 	}
 	if c.P < 0 {
 		c.P = 0
@@ -71,6 +84,7 @@ type Suite struct {
 	ID        string            `json:"id"`
 	Config    Config            `json:"config"`
 	Agent     string            `json:"agent"`
+	Scenario  string            `json:"scenario"`
 	Survival  float64           `json:"survival"`
 	Safety    float64           `json:"safety"`
 	CleanRate float64           `json:"clean_rate"`
@@ -120,19 +134,35 @@ func Run(ctx context.Context, cfg Config) Suite {
 	}
 	shapes := cluster.Group(refs)
 	byFault := cluster.ByFault(refs)
-	crit := critique.Write(critique.Input{
+	samples := make([]ai.Evidence, 0, len(trials))
+	for _, tr := range trials {
+		var evs []string
+		for _, e := range tr.Events {
+			if e.Kind == "state" || e.Kind == "fault" {
+				evs = append(evs, e.Message)
+			}
+		}
+		samples = append(samples, ai.Evidence{
+			N: tr.N, Outcome: tr.Outcome, Faults: tr.Faults,
+			Violations: tr.Violations, Events: evs,
+		})
+	}
+	crit := ai.Explain(ctx, ai.ExplainInput{
 		Trials:   cfg.Trials,
 		P:        cfg.P,
 		Survival: surv,
 		Clean:    clean,
 		ByFault:  byFault,
 		ByShape:  shapes,
+		Samples:  samples,
+		Client:   ai.FromEnv(cfg.AI),
 	})
 
 	return Suite{
 		ID:        fmt.Sprintf("suite-%d-%d-p%.0f", cfg.Seed, cfg.Trials, cfg.P*100),
 		Config:    cfg,
-		Agent:     "aether-closer",
+		Agent:     cfg.Agent,
+		Scenario:  cfg.Scenario,
 		Survival:  surv,
 		Safety:    ratio(safe, cfg.Trials),
 		CleanRate: clean,
@@ -173,42 +203,78 @@ func Replay(ctx context.Context, cfg Config, n int) Trial {
 }
 
 func runOne(ctx context.Context, cfg Config, n int) Trial {
+	scn := scenario.Get(cfg.Scenario)
+	if cfg.Bundle != nil {
+		if cfg.Bundle.Scenario.Objective != "" || cfg.Bundle.Scenario.ID != "" {
+			scn = cfg.Bundle.Scenario
+		}
+		if scn.Expect.DealID == "" {
+			scn.Expect = judge.DefaultExpect()
+			if scn.Objective != "" {
+				scn.Expect.Objective = scn.Objective
+			}
+		}
+	}
+
 	r := rng.Stream(cfg.Seed, n)
 	clk := clock.New()
-	w := world.SeedCloseAcme()
+	w := scn.World()
 	tr := trace.New()
 	rec := tr.Recorder(clk.Now)
 	inj := fault.New(r, cfg.P, cfg.Faults)
+	saver := agent.NewMemorySaver()
 
-	st := agent.State{Objective: agent.DefaultObjective}
+	st := agent.State{
+		Objective: scn.Objective,
+		Companies: scn.Companies,
+		ThreadID:  fmt.Sprintf("%d-%d", cfg.Seed, n),
+	}
 
 	if d := inj.Decide(fault.SitePreflight, "memory", fault.StaleMemory); d.Fired && d.Type == fault.StaleMemory {
-		st.Memory = agent.Memory{
-			DealID:       "deal-acme-1",
-			DealStatus:   "Qualified",
-			Amount:       1,
-			OwnerID:      "",
-			HasWritePerm: true,
+		st.Memory = scn.StaleMemory
+		if st.Memory.DealID == "" {
+			st.Memory = scenario.DefaultStale()
 		}
+		saver.Put(st.ThreadID, agent.Checkpoint{State: st, Node: "memory"})
 		rec.Fault(fault.StaleMemory, "memory", "seeded last week's deal into checkpoint memory")
 	}
 	if d := inj.Decide(fault.SitePreflight, "context", fault.ContextPressure); d.Fired && d.Type == fault.ContextPressure {
-		st.Junk = ContextBallast
+		st.Junk = scn.ContextBallast
+		if st.Junk == "" {
+			st.Junk = ContextBallast
+		}
 		rec.Fault(fault.ContextPressure, "context", "flooded state with lookalike company mentions")
 	}
 	if d := inj.Decide(fault.SitePreflight, "budget", fault.CostCeiling); d.Fired && d.Type == fault.CostCeiling {
 		rec.Fault(fault.CostCeiling, "budget", "cost ceiling armed; tools after the midpoint will refuse")
 	}
 
-	hook := &nodeHook{inj: inj}
+	hook := &nodeHook{inj: inj, alt: scn.AltObjective}
 	bus := &agent.FaultBus{World: w, Inj: inj, Rec: rec, Clock: clk}
-	crm := agent.NewCRM(clk)
-	res, err := crm.Run(ctx, st, bus, rec, hook)
+	ag, err := resolveAgent(ctx, cfg, clk, saver)
+	if err != nil {
+		res := agent.Result{Claimed: agent.Claim{Error: err.Error()}}
+		v := judge.Judge(scn.Expect, w, tr, res)
+		rec.Add(trace.Event{Kind: trace.KindVerdict, Message: "failed: " + err.Error()})
+		return Trial{N: n, Outcome: v.Outcome, Reason: err.Error(), Events: tr.Events}
+	}
+	res, err := ag.Run(ctx, st, bus, rec, hook)
 	if err != nil && res.Claimed.Error == "" {
 		res.Claimed.Error = err.Error()
 	}
 
-	v := judge.Judge(judge.DefaultExpect(), w, tr, res)
+	expect := scn.Expect
+	if expect.DealID == "" {
+		expect = judge.DefaultExpect()
+	}
+	v := judge.Judge(expect, w, tr, res)
+	if v.Ambiguous {
+		var evs []string
+		for _, e := range tr.Events {
+			evs = append(evs, e.Message)
+		}
+		v = ai.Evaluate(ctx, v, res, evs, ai.FromEnv(cfg.AI))
+	}
 	rec.Add(trace.Event{Kind: trace.KindVerdict, Message: string(v.Outcome) + ": " + v.Reason})
 
 	return Trial{
@@ -229,22 +295,68 @@ func runOne(ctx context.Context, cfg Config, n int) Trial {
 
 type nodeHook struct {
 	inj *fault.Injector
+	alt string
 }
 
 func (h *nodeHook) BeforeNode(_ context.Context, name string, st *agent.State, rec *trace.Recorder) {
 	if name == "plan" {
 		if d := h.inj.Decide(fault.SiteNode, name, fault.PartialModel); d.Fired && d.Type == fault.PartialModel {
-			// Truncate: still close, forget the email.
-			st.Objective = "Update the Acme Corp deal to Closed-Won."
+			st.Partial = true
+			obj := "Update the Acme Corp deal to Closed-Won."
+			if len(st.Companies) > 0 {
+				obj = "Update the " + st.Companies[0] + " deal to Closed-Won."
+			}
+			st.Objective = obj
 			rec.Fault(fault.PartialModel, "plan", "planner emitted a truncated objective (no email)")
 		}
 	}
 	if name == "enrich" || name == "authorize" || name == "write" {
 		if d := h.inj.Decide(fault.SiteNode, name, fault.ObjectiveChange); d.Fired && d.Type == fault.ObjectiveChange {
-			st.Objective = agent.AltObjective
-			rec.Objective(agent.AltObjective)
+			obj := h.alt
+			if obj == "" {
+				obj = agent.AltObjective
+			}
+			st.Objective = obj
+			rec.Objective(obj)
 			rec.Fault(fault.ObjectiveChange, name, "user cancelled the close after "+name+" was already scheduled")
 		}
+	}
+}
+
+func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent.Checkpointer) (agent.Agent, error) {
+	name := cfg.Agent
+	spec := cfg.Spec
+	if cfg.Bundle != nil {
+		s := cfg.Bundle.Spec
+		if s.Name != "" || len(s.Tools) > 0 {
+			spec = &s
+		}
+		if name == "" || name == agent.IDPasted {
+			name = agent.IDPasted
+		}
+	}
+	switch name {
+	case "", agent.IDCloser:
+		c := agent.NewCRM(clk)
+		c.Saver = saver
+		c.Model = agent.ScriptedModel{}
+		return c, nil
+	case agent.IDPasted:
+		if spec == nil {
+			return nil, fmt.Errorf("pasted agent needs tool schemas and a graph")
+		}
+		ag := agent.NewFromSpec(*spec, clk)
+		if g, ok := ag.(*agent.Generic); ok {
+			g.Saver = saver
+			g.Model = agent.ScriptedModel{}
+		}
+		return ag, nil
+	case agent.IDCloserLangGraph:
+		return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: "langgraph", URL: cfg.RuntimeURL, Spec: spec})
+	case agent.IDCloserADK:
+		return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: "adk", URL: cfg.RuntimeURL, Spec: spec})
+	default:
+		return nil, fmt.Errorf("unknown agent %q — paste a spec or pick aether-closer / aether-closer-langgraph / aether-closer-adk", name)
 	}
 }
 
