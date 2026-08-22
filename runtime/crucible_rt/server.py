@@ -315,6 +315,15 @@ def main(argv=None):
         calls = (((chat.get("choices") or [{}])[0].get("message") or {}).get("tool_calls") or [])
         if not calls or calls[0]["function"]["name"] != "search_ticket":
             raise SystemExit("openai proxy: %s" % chat)
+        # The same request must answer identically, ids included. uuid4 and
+        # time.time() gave the agent a different call id and timestamp on every
+        # replay of the same trial.
+        again = openai_proxy.complete({
+            "messages": [{"role": "user", "content": "Resolve the Acme Corp ticket."}],
+            "tools": [{"type": "function", "function": {"name": "search_ticket"}}],
+        })
+        if again != chat:
+            raise SystemExit("openai proxy is not deterministic:\n%s\n%s" % (chat, again))
         print("openai-proxy-ok", calls[0]["function"]["name"])
 
         closure = loader.resolve_entry("examples/http_closure.py")

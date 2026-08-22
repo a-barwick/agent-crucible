@@ -8,9 +8,8 @@ call a model. Tool execution stays in the agent (and hits httpio).
 
 from __future__ import annotations
 
+import hashlib
 import json
-import time
-import uuid
 
 
 def complete(body: dict) -> dict:
@@ -56,9 +55,19 @@ def _entity(text: str) -> str:
     return "Acme Corp"
 
 
+def _digest(payload) -> str:
+    """A stable id for a request. uuid4 and time.time() made two replays of the
+    same trial differ in the ids and the timestamp they handed the agent, which
+    is exactly the wall-clock dependence the rest of the harness refuses: an
+    agent that echoes a call id, logs it, or keys anything off it produced a
+    different trace each run."""
+    raw = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
 def _call(name: str, args: dict) -> dict:
     return {
-        "id": "call-" + uuid.uuid4().hex[:8],
+        "id": "call-" + _digest({"tool": name, "args": args})[:8],
         "type": "function",
         "function": {"name": name, "arguments": json.dumps(args)},
     }
@@ -68,10 +77,19 @@ def _msg(body: dict, content: str = "", calls: list | None = None) -> dict:
     msg = {"role": "assistant", "content": content or None}
     if calls:
         msg["tool_calls"] = calls
+    turn = {
+        "messages": body.get("messages") or [],
+        "tools": body.get("tools") or [],
+        "model": body.get("model") or "",
+        "content": content,
+        "calls": calls or [],
+    }
     return {
-        "id": "chatcmpl-" + uuid.uuid4().hex[:10],
+        "id": "chatcmpl-" + _digest(turn)[:10],
         "object": "chat.completion",
-        "created": int(time.time()),
+        # The chamber's clock is a tick counter that starts at zero; there is no
+        # wall time in a trial, and inventing one here only made replays differ.
+        "created": 0,
         "model": body.get("model") or "scripted",
         "choices": [{"index": 0, "message": msg, "finish_reason": "tool_calls" if calls else "stop"}],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
