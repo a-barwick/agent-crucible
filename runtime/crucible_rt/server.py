@@ -1,5 +1,8 @@
 import json
+import os
 import sys
+import threading
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -326,12 +329,17 @@ def main(argv=None):
     addr = "127.0.0.1:8091"
     if "--addr" in argv:
         addr = argv[argv.index("--addr") + 1]
+    parent = 0
+    if "--parent-pid" in argv:
+        parent = int(argv[argv.index("--parent-pid") + 1])
     host, port = addr.rsplit(":", 1)
     # Threaded: an agent under test may call the sidecar's own OpenAI proxy while
     # /v1/run is still on the stack, and a single-threaded server would sit and
     # wait for itself.
     httpd = ThreadingHTTPServer((host, int(port)), Handler)
     httpd.daemon_threads = True
+    if parent > 0:
+        threading.Thread(target=_watch_parent, args=(parent, httpd), daemon=True).start()
     print(f"crucible-rt listening on {addr}", flush=True)
     try:
         httpd.serve_forever()
@@ -339,6 +347,31 @@ def main(argv=None):
         pass
     finally:
         httpd.server_close()
+
+
+def _watch_parent(parent: int, httpd) -> None:
+    """Exit when the runner that started us does.
+
+    The runner kills its sidecars on the way out, but it does not always get
+    the chance: SIGKILL, a panic, or a Ctrl-C that skips the cleanup path all
+    leave this process reparented to init, holding a port and serving the code
+    it happened to start with. Comparing getppid() to the pid we were handed is
+    immune to pid reuse -- once it differs, our parent is gone whoever adopted
+    us."""
+    while True:
+        time.sleep(1.0)
+        if os.getppid() == parent:
+            continue
+        # Announce it only if anyone can still hear. stdout is a pipe to the
+        # parent, so by now writing it usually raises BrokenPipeError, and an
+        # exception here used to kill this thread before the shutdown below --
+        # leaving exactly the orphan it exists to prevent.
+        try:
+            print(f"crucible-rt: parent {parent} exited, shutting down", flush=True)
+        except OSError:
+            pass
+        httpd.shutdown()
+        return
 
 
 def _smoke_wrapper_honesty() -> None:

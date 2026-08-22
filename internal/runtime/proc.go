@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -117,7 +118,12 @@ func EnsureLocal(ctx context.Context) (*Proc, error) {
 	}
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	pctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(pctx, "python3", "-m", "crucible_rt", "serve", "--addr", addr)
+	// --parent-pid: Stop() below is the normal way a sidecar dies, but a
+	// SIGKILL or a panic never reaches it, and an orphaned sidecar sits on its
+	// port for the life of the machine. Told who its parent is, it leaves when
+	// we do.
+	cmd := exec.CommandContext(pctx, "python3", "-m", "crucible_rt", "serve",
+		"--addr", addr, "--parent-pid", strconv.Itoa(os.Getpid()))
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "PYTHONPATH="+dir)
 	stdout, _ := cmd.StdoutPipe()

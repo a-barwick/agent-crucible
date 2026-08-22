@@ -189,3 +189,5 @@ web/                   timeline UI
 ```
 
 `make test` runs the Go suite, the Python sidecar smoke (`python3 -m crucible_rt smoke`), and the Node sidecar self-test (`node runtime/js/selftest.mjs`). The sidecar checks cover what the Go tests cannot see from outside: that a tool body's own exception reaches the timeline instead of being replaced by a synthetic success, that two runs cannot read each other's intercepted I/O, and that an unreachable chamber raises rather than posing as a failed tool.
+
+A sidecar is started on demand, reused across the trials of a suite, and killed when the command that started it returns. It does not depend on being killed: it is told its parent's pid and exits on its own when that pid is no longer its parent, so a `SIGKILL` or a crash cannot leave a server behind holding a port and answering with stale code.

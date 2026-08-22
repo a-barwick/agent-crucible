@@ -163,11 +163,40 @@ process.on("uncaughtException", (err) => {
 });
 
 const argv = process.argv.slice(2);
-let addr = "127.0.0.1:8093";
-const i = argv.indexOf("--addr");
-if (i >= 0) addr = argv[i + 1];
+function flag(name, fallback) {
+  const i = argv.indexOf(name);
+  return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : fallback;
+}
+
+// Exit when the runner that started us does. The runner kills its sidecars on
+// the way out, but it does not always get the chance: SIGKILL, a panic, or a
+// Ctrl-C that skips the cleanup path all leave this process reparented to init,
+// holding a port and serving the code it happened to start with. Comparing
+// process.ppid to the pid we were handed is immune to pid reuse -- once it
+// differs, our parent is gone whoever adopted us.
+function watchParent(parent, server) {
+  const timer = setInterval(() => {
+    if (process.ppid === parent) return;
+    clearInterval(timer);
+    // Announce it only if anyone can still hear. stderr is a pipe to the
+    // parent, so writing it can throw EPIPE by now, and that must not stop the
+    // exit below -- otherwise this leaves exactly the orphan it prevents.
+    try {
+      console.error("crucible-js: parent " + parent + " exited, shutting down");
+    } catch {}
+    server.close();
+    // close() only stops new connections; a keep-alive socket from the dead
+    // parent would hold the loop open forever.
+    process.exit(0);
+  }, 1000);
+  timer.unref();
+}
+
+const addr = flag("--addr", "127.0.0.1:8093");
+const parent = Number(flag("--parent-pid", 0));
 const [host, port] = addr.split(":");
 const server = createServer();
 server.listen(Number(port), host, () => {
   console.log("crucible-js listening on " + addr);
 });
+if (parent > 0) watchParent(parent, server);

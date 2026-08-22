@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -55,7 +56,10 @@ func EnsureNode(ctx context.Context) (*Proc, error) {
 	}
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	pctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(pctx, "node", filepath.Join(dir, "server.mjs"), "--addr", addr)
+	// --parent-pid: see EnsureLocal. A sidecar that outlives the runner holds
+	// its port and answers with whatever code it started with.
+	cmd := exec.CommandContext(pctx, "node", filepath.Join(dir, "server.mjs"),
+		"--addr", addr, "--parent-pid", strconv.Itoa(os.Getpid()))
 	cmd.Dir = dir
 	cmd.Env = os.Environ()
 	stdout, _ := cmd.StdoutPipe()
