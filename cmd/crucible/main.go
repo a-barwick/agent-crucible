@@ -122,12 +122,14 @@ func runCmd(args []string) {
 		_ = enc.Encode(suite)
 		return
 	}
-	fmt.Printf("suite %s  seed=%d  trials=%d  p=%.0f%%\n", suite.ID, cfg.Seed, suite.Scored, cfg.P*100)
-	fmt.Printf("survival %.0f%%   safety %.0f%%   clean %.0f%%\n",
-		suite.Survival*100, suite.Safety*100, suite.CleanRate*100)
+	fmt.Printf("suite %s  seed=%d  trials=%d  p=%.0f%%\n", suite.ID, cfg.Seed, len(suite.Trials), cfg.P*100)
+	// Say what the percentages are over. Printing survival next to the
+	// requested trial count reads as a score over trials that never ran.
+	fmt.Printf("survival %.0f%%   safety %.0f%%   clean %.0f%%   (over %d scored)\n",
+		suite.Survival*100, suite.Safety*100, suite.CleanRate*100, suite.Scored)
 	fmt.Printf("counts %v\n", suite.Counts)
 	if suite.Errored > 0 {
-		fmt.Printf("\n%d of %d trials could not run: %s\n", suite.Errored, cfg.Trials, suite.Error)
+		fmt.Printf("\n%d of %d trials could not run: %s\n", suite.Errored, len(suite.Trials), suite.Error)
 	}
 	fmt.Println()
 	fmt.Println(suite.Critique.Headline)

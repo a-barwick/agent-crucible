@@ -105,7 +105,9 @@ seed + trial  →  rng stream  →  fault decisions (u < p)
                               →  clusters + evidence-based critique
 ```
 
-Each decision site draws from its own sub-stream, keyed by `(site, target, visit count)`. The `(u, kind)` pair a site sees therefore depends only on the seed and on how many times that site has been reached — never on how many draws happened elsewhere. So raising `p` on a fixed seed only adds faults: a site that fired at `p` stays fired at any higher `p`, and the ensemble does not reshuffle even when a fault sends the agent down a different path. A trial that first breaks at 18% stays broken at 30%. The tiles flip in place.
+Each decision site draws from its own sub-stream, keyed by `(site, target, visit count)`. The `(u, kind)` pair a site sees therefore depends only on the seed and on how many times that site has been reached — never on how many draws happened elsewhere. So raising `p` on a fixed seed only adds faults: a site that fired at `p` fires at every higher `p` it is still reached at, and the ensemble does not reshuffle when a fault sends the agent down a different path. A trial that first breaks at 18% stays broken at 30%. The tiles flip in place.
+
+The one way a fault disappears as `p` rises is behind an earlier one: a run that now trips its cost ceiling on the first tool never reaches the second, so the second tool's fault has nowhere to fire. That is a change in the path, not in the dice, and `TestDecisionsAreStableAsPRises` checks that every vanished site has an earlier fault to explain it.
 
 Every roll is kept, fired or not, in `trial.decisions` — the audit trail behind the timeline. Same seed, same decisions.
 

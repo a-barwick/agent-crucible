@@ -16,6 +16,16 @@ import (
 	"github.com/a-barwick/agent-crucible/internal/scenario"
 )
 
+// TestMain reaps the sidecars the drop-in tests start. They live in package
+// globals so a suite can reuse them, and nothing else tears them down, so a
+// bare `go test ./...` used to leave a Python server and a Node server running
+// per package for as long as the shell did.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	runtime.StopAll()
+	os.Exit(code)
+}
+
 func TestTicketLangGraphClean(t *testing.T) {
 	if !runtime.HaveLangGraph() {
 		t.Skip("langgraph not installed")

@@ -5,8 +5,11 @@
 // (u, kind) pair a site sees depends only on the seed and on how many times
 // that site has been reached — never on how many draws happened elsewhere.
 // Raising the failure probability on a fixed seed therefore only adds faults:
-// a site that fired at p stays fired at any p' > p, and the ensemble does not
-// reshuffle even when a fault changes the agent's path.
+// a site that fired at p fires at every p' > p it is still reached at, and the
+// ensemble does not reshuffle when a fault changes the agent's path. The one
+// way a fault disappears is behind an earlier one — a run that now aborts at
+// the first tool never reaches the second — which is a change in the path, not
+// in the dice. TestDecisionsAreStableAsPRises holds both halves of that.
 package fault
 
 import (

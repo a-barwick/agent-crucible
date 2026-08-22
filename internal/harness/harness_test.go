@@ -111,14 +111,25 @@ func TestDecisionsAreStableAsPRises(t *testing.T) {
 			runs[i][tr.N] = tr
 		}
 	}
-	shared := 0
+	shared, vanished := 0, 0
 	for i := 1; i < len(ps); i++ {
 		for n, lo := range runs[i-1] {
-			hi := decisionsByKey(runs[i][n])
-			for key, a := range decisionsByKey(lo) {
+			hiTrial := runs[i][n]
+			hi := decisionsByKey(hiTrial)
+			loKeys, loOrder := decisionsByKey(lo), decisionOrder(lo)
+			for key, a := range loKeys {
 				b, ok := hi[key]
 				if !ok {
-					continue // the higher-p run never reached this site
+					// The higher-p run never reached this site. That is only
+					// legitimate behind a fault that fired earlier and cut the
+					// run short — otherwise the ensemble reshuffled, which is
+					// what this test exists to catch.
+					if !firedBefore(hiTrial, loOrder[key]) {
+						t.Fatalf("trial %d site %s: reached at p=%v but not at p=%v, with no earlier fault to explain it (p=%v decisions %v)",
+							n, key, ps[i-1], ps[i], ps[i], decisionKeys(hiTrial))
+					}
+					vanished++
+					continue
 				}
 				shared++
 				if a.U != b.U || a.Type != b.Type {
@@ -135,14 +146,62 @@ func TestDecisionsAreStableAsPRises(t *testing.T) {
 	if shared == 0 {
 		t.Fatal("no sites were shared between runs; the test compared nothing")
 	}
+	t.Logf("compared %d shared sites; %d vanished behind an earlier fault", shared, vanished)
+}
+
+// firedBefore reports whether tr fired a fault at a decision index below idx.
+// That is the one thing allowed to make a site the lower-p run reached
+// unreachable: the run stopped before getting there.
+func firedBefore(tr Trial, idx int) bool {
+	for i, d := range tr.Decisions {
+		if i >= idx {
+			break
+		}
+		if d.Fired {
+			return true
+		}
+	}
+	// The arming of a cost ceiling is logged at preflight but only bites on a
+	// later call, so a run can end early with its only fired decision after the
+	// site that disappeared.
+	for _, d := range tr.Decisions {
+		if d.Fired && d.Type == fault.CostCeiling {
+			return true
+		}
+	}
+	return false
 }
 
 func decisionsByKey(tr Trial) map[string]fault.Decision {
 	out := map[string]fault.Decision{}
 	for _, d := range tr.Decisions {
-		out[fmt.Sprintf("%s|%s|%d", d.Site, d.Target, d.Visit)] = d
+		out[decisionKey(d)] = d
 	}
 	return out
+}
+
+func decisionOrder(tr Trial) map[string]int {
+	out := map[string]int{}
+	for i, d := range tr.Decisions {
+		out[decisionKey(d)] = i
+	}
+	return out
+}
+
+func decisionKeys(tr Trial) []string {
+	out := make([]string, 0, len(tr.Decisions))
+	for _, d := range tr.Decisions {
+		mark := ""
+		if d.Fired {
+			mark = "!"
+		}
+		out = append(out, mark+decisionKey(d))
+	}
+	return out
+}
+
+func decisionKey(d fault.Decision) string {
+	return fmt.Sprintf("%s|%s|%d", d.Site, d.Target, d.Visit)
 }
 
 func TestSingleFaultMalformed(t *testing.T) {

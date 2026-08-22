@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/a-barwick/agent-crucible/internal/agent"
@@ -12,6 +13,15 @@ import (
 	"github.com/a-barwick/agent-crucible/internal/trace"
 	"github.com/a-barwick/agent-crucible/internal/world"
 )
+
+// TestMain reaps the sidecars these tests start. They are kept alive in package
+// globals for reuse across a suite, so without this the test binary exits and
+// leaves a Python server behind.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	StopAll()
+	os.Exit(code)
+}
 
 func TestLangGraphHappyPath(t *testing.T) {
 	if !HaveLangGraph() {
