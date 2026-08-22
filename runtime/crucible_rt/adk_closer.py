@@ -4,7 +4,7 @@ google.adk is used when installed. Otherwise this is a faithful ADK-shaped
 loop — instruction, tools, session state, model — that still callbacks into Go.
 """
 
-from . import patient
+from . import generic, patient
 
 HAS_ADK = False
 try:  # pragma: no cover
@@ -63,6 +63,9 @@ class RunnerADK:
 
 
 def run(cb, req: dict) -> dict:
+    spec = req.get("spec") or {}
+    if generic.should_compile(spec):
+        return generic.run_adk(cb, req)
     agent = Agent(
         name="aether-closer",
         instruction="Close the named deal and email the AE. Use the CRM tools in order.",

@@ -32,6 +32,17 @@ func IsWriteLike(name string) bool      { return Classify(name) == KindWrite }
 func IsEmailLike(name string) bool      { return Classify(name) == KindEmail }
 func IsPermissionLike(name string) bool { return Classify(name) == KindPermission }
 
+// LooksLikeCRM is true when the spec still speaks the sample closer's tool names.
+func LooksLikeCRM(tools []Tool) bool {
+	for _, t := range tools {
+		switch t.Name {
+		case "lookup_contact", "get_deal", "write_deal", "send_email", "check_permission":
+			return true
+		}
+	}
+	return false
+}
+
 // Find returns the named tool from a spec.
 func Find(tools []Tool, name string) (Tool, bool) {
 	for _, t := range tools {

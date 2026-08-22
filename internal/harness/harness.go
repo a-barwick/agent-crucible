@@ -37,8 +37,9 @@ type Config struct {
 	Agent      string           `json:"agent,omitempty"`
 	Spec       *agent.Spec      `json:"spec,omitempty"`
 	Bundle     *scenario.Bundle `json:"bundle,omitempty"`
-	RuntimeURL string           `json:"runtime_url,omitempty"`
-	AI         ai.Config        `json:"ai,omitempty"`
+	RuntimeURL string              `json:"runtime_url,omitempty"`
+	AI         ai.Config           `json:"ai,omitempty"`
+	Extra      []scenario.Scenario `json:"extra_scenarios,omitempty"`
 }
 
 func (c Config) withDefaults() Config {
@@ -204,14 +205,8 @@ func Replay(ctx context.Context, cfg Config, n int) Trial {
 }
 
 func runOne(ctx context.Context, cfg Config, n int) Trial {
-	scn := scenario.Get(cfg.Scenario)
+	scn := resolveScenario(cfg)
 	spec := specOf(cfg)
-	if cfg.Bundle != nil {
-		b := cfg.Bundle.Scenario
-		if b.Objective != "" || b.ID != "" || b.Expect.Specified() || b.Fixture != nil {
-			scn = b
-		}
-	}
 	scn.Expect = resolveExpect(scn)
 
 	r := rng.Stream(cfg.Seed, n)
@@ -264,14 +259,7 @@ func runOne(ctx context.Context, cfg Config, n int) Trial {
 		res.Claimed.Error = err.Error()
 	}
 
-	expect := scn.Expect
-	if !expect.Specified() {
-		expect = judge.DefaultExpect()
-		if scn.Objective != "" {
-			expect.Objective = scn.Objective
-		}
-	}
-	v := judge.Judge(expect, w, tr, res)
+	v := judge.Judge(scn.Expect, w, tr, res)
 	if v.Ambiguous {
 		var evs []string
 		for _, e := range tr.Events {
@@ -327,6 +315,27 @@ func (h *nodeHook) BeforeNode(_ context.Context, name string, st *agent.State, r
 	}
 }
 
+func resolveScenario(cfg Config) scenario.Scenario {
+	if cfg.Bundle != nil {
+		b := cfg.Bundle.Scenario
+		if b.Objective != "" || b.ID != "" || b.Expect.Specified() || b.Fixture != nil {
+			if b.ID == "" && cfg.Scenario != "" {
+				b.ID = cfg.Scenario
+			}
+			return b
+		}
+	}
+	if s, ok := scenario.Lookup(cfg.Scenario); ok {
+		return s
+	}
+	for _, s := range cfg.Extra {
+		if s.ID == cfg.Scenario {
+			return s
+		}
+	}
+	return scenario.Get(cfg.Scenario)
+}
+
 func specOf(cfg Config) *agent.Spec {
 	if cfg.Bundle != nil {
 		s := cfg.Bundle.Spec
@@ -343,6 +352,16 @@ func resolveExpect(scn scenario.Scenario) judge.Expect {
 		e.Objective = scn.Objective
 	}
 	if e.Specified() {
+		return e
+	}
+	if scn.Fixture != nil && len(scn.Fixture.Records) > 0 {
+		rec := scn.Fixture.Records[0]
+		if e.RecordID == "" {
+			e.RecordID = rec.ID
+		}
+		if e.Status == "" {
+			e.Status = agent.ActionStatus(agent.ParseIntent(e.Objective).DealAction)
+		}
 		return e
 	}
 	def := judge.DefaultExpect()
@@ -373,6 +392,9 @@ func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent
 	case agent.IDPasted:
 		if spec == nil {
 			return nil, fmt.Errorf("pasted agent needs tool schemas and a graph")
+		}
+		if spec.Runtime == "langgraph" || spec.Runtime == "adk" {
+			return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: spec.Runtime, URL: cfg.RuntimeURL, Spec: spec})
 		}
 		ag := agent.NewFromSpec(*spec, clk)
 		if g, ok := ag.(*agent.Generic); ok {

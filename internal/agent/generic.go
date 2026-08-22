@@ -362,13 +362,12 @@ func nextFrom(g GraphSpec, from string) string {
 }
 
 func looksLikeCRM(tools []schema.Tool) bool {
-	for _, t := range tools {
-		switch t.Name {
-		case "lookup_contact", "get_deal", "write_deal", "send_email", "check_permission":
-			return true
-		}
-	}
-	return false
+	return schema.LooksLikeCRM(tools)
+}
+
+// LooksLikeCRM reports whether the spec is the sample closer's tool set.
+func LooksLikeCRM(tools []schema.Tool) bool {
+	return schema.LooksLikeCRM(tools)
 }
 
 func graphFromTools(tools []schema.Tool) GraphSpec {

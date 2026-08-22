@@ -187,7 +187,7 @@ func adviceFor(ev string) (advice, node string) {
 	low := strings.ToLower(ev)
 	switch {
 	case strings.Contains(low, "accepted empty") || strings.Contains(low, "missing fields") || strings.Contains(low, "malformed"):
-		return "Add validation before the write node. Required fields on get_deal and write_deal must be present or the edge should abort.", "write"
+		return "Add validation before the write node. Required fields on the write tool must be present or the edge should abort.", "write"
 	case strings.Contains(low, "ignored permission") || strings.Contains(low, "missing permission"):
 		return "Gate the write node on a live permission edge. A 403 is a hard stop, not a transport success.", "authorize"
 	case strings.Contains(low, "authorize skipped") || strings.Contains(low, "defaulted missing"):

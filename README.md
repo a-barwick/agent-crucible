@@ -89,12 +89,13 @@ Ambiguous traces (claimed success, world unfinished, no unsafe mutation) go to t
 ## Bring your own agent
 
 1. **Paste** a JSON bundle in the UI (`spec.tools`, optional `spec.graph` / `node_tools`, `scenario.fixtures`, `scenario.expect`).
-2. **Implement** `agent.Agent` in-process.
-3. **Speak the protocol**: `POST /v1/run` with `{callback, token, objective, thread_id}`. Call `POST {callback}/tool` and `POST {callback}/before_node`. LangGraph and ADK sidecars are two implementations.
+2. **Switch the agent** to `aether-closer-langgraph` or `aether-closer-adk` to compile that spec on the sidecar. The in-process `pasted` agent stays the fast Go twin. Set `spec.runtime` to `langgraph` / `adk` to force the sidecar from `pasted`.
+3. **Generate scenarios** from the pasted tools. Drafts carry `expect` + `fixtures` and actually run — they are not silent aliases for close-acme.
+4. **Implement** `agent.Agent` in-process, or **speak the protocol**: `POST /v1/run` with `{callback, token, objective, thread_id, spec}`. Call `POST {callback}/tool` and `POST {callback}/before_node`.
 
-The world is not CRM-only. Tool names in the spec are classified (`search_*` reads, `update_*` writes, `send_*` / `notify_*` emails, `*permission*` checks) and served from `fixtures.records`. Known CRM names still hit the sample tables. The judge scores `expect` — `record_id` / `status` / `writes` / `emails` / `record_fields` — not hardcoded Acme ids.
+The world is not CRM-only. Tool names in the spec are classified (`search_*` reads, `update_*` writes, `send_*` / `notify_*` emails, `*permission*` checks) and served from `fixtures.records`. Known CRM names still hit the sample tables. The judge scores `expect` — `record_id` / `status` / `writes` / `emails` / `record_fields` — not hardcoded Acme ids. Unknown scenario ids look in `extra_scenarios` / the bundle before falling back to the library.
 
-Tools without a graph become a linear walk after `plan`. CRM tool names without a graph still compile the sample closer.
+Tools without a graph become a linear walk after `plan`. CRM tool names without a custom graph still compile the sample closer. Anything else is compiled from the spec on Go, LangGraph, or ADK.
 
 ```json
 {
@@ -134,6 +135,6 @@ internal/judge/        expect-driven recovery rules
 internal/cluster/      failure fingerprints
 internal/critique/     critique types
 internal/server/       /api/meta /api/run /api/sweep /api/replay /api/generate
-runtime/crucible_rt/   LangGraph StateGraph + ADK adapter
+runtime/crucible_rt/   LangGraph StateGraph + ADK adapter + generic spec compiler
 web/                   timeline UI
 ```

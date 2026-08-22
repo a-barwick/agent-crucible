@@ -19,6 +19,15 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+func TestLooksLikeCRM(t *testing.T) {
+	if !LooksLikeCRM([]Tool{{Name: "write_deal"}}) {
+		t.Fatal("write_deal is CRM")
+	}
+	if LooksLikeCRM([]Tool{{Name: "search_ticket"}, {Name: "update_ticket"}}) {
+		t.Fatal("ticket tools are not CRM")
+	}
+}
+
 func TestFind(t *testing.T) {
 	tools := []Tool{{Name: "update_ticket"}, {Name: "search_ticket"}}
 	got, ok := Find(tools, "update_ticket")

@@ -67,15 +67,16 @@ type runReq struct {
 	Agent      string           `json:"agent"`
 	Scenario   string           `json:"scenario"`
 	Spec       *agent.Spec      `json:"spec"`
-	Bundle     *scenario.Bundle `json:"bundle"`
-	RuntimeURL string           `json:"runtime_url"`
+	Bundle     *scenario.Bundle    `json:"bundle"`
+	RuntimeURL string              `json:"runtime_url"`
+	Extra      []scenario.Scenario `json:"extra_scenarios,omitempty"`
 }
 
 func cfgOf(r runReq) harness.Config {
 	return harness.Config{
 		Seed: r.Seed, Trials: r.Trials, P: r.P, Faults: r.Faults,
 		Agent: r.Agent, Scenario: r.Scenario, Spec: r.Spec,
-		Bundle: r.Bundle, RuntimeURL: r.RuntimeURL,
+		Bundle: r.Bundle, RuntimeURL: r.RuntimeURL, Extra: r.Extra,
 	}
 }
 

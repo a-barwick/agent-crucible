@@ -48,9 +48,40 @@
     if (current) sel.value = current;
   }
 
+  function looksLikeCRM(tools) {
+    const names = new Set((tools || []).map((t) => t.name));
+    return ["lookup_contact", "get_deal", "write_deal", "send_email", "check_permission"].some((n) =>
+      names.has(n)
+    );
+  }
+
+  function extraItems() {
+    return (state.extraScenarios || []).map((d) => ({
+      id: d.id,
+      name: (d.source && d.source !== "library" ? d.source + ": " : "") + d.name,
+      objective: d.objective,
+    }));
+  }
+
   function fillScenarios() {
-    const items = [...(state.meta.scenarios || []), ...state.extraScenarios];
-    fillSelect($("scenario"), items, "id", "name", state.meta.defaults.scenario);
+    const custom = state.bundle && !looksLikeCRM(state.bundle.spec && state.bundle.spec.tools);
+    const lib = custom ? [] : state.meta.scenarios || [];
+    const items = [...lib, ...extraItems()];
+    const pasted = state.bundle && state.bundle.scenario;
+    if (pasted && (pasted.id || pasted.objective) && !items.find((i) => i.id === (pasted.id || "pasted"))) {
+      items.unshift({
+        id: pasted.id || "pasted",
+        name: pasted.name || "Pasted scenario",
+        objective: pasted.objective,
+      });
+    }
+    const current = $("scenario") && $("scenario").value;
+    fillSelect($("scenario"), items, "id", "name", current || (items[0] && items[0].id) || state.meta.defaults.scenario);
+  }
+
+  function selectedExtra() {
+    const id = $("scenario").value;
+    return (state.extraScenarios || []).find((s) => s.id === id) || null;
   }
 
   function renderFaults() {
@@ -199,6 +230,7 @@
   }
 
   function payload() {
+    const extra = selectedExtra();
     const body = {
       seed: Number($("seed").value) || 42,
       trials: Number($("trials").value) || 40,
@@ -208,7 +240,15 @@
       agent: $("agent").value,
       scenario: $("scenario").value,
     };
-    if (state.bundle) body.bundle = state.bundle;
+    if (state.extraScenarios && state.extraScenarios.length) {
+      body.extra_scenarios = state.extraScenarios;
+    }
+    if (state.bundle || extra) {
+      body.bundle = {
+        spec: (state.bundle && state.bundle.spec) || undefined,
+        scenario: extra || (state.bundle && state.bundle.scenario) || {},
+      };
+    }
     return body;
   }
 
@@ -248,11 +288,18 @@
       $("agent-name").textContent = info.name;
       $("agent-fw").textContent = info.framework;
     }
-    if ($("agent").value !== "pasted") state.bundle = null;
+    const keep = new Set(["pasted", "aether-closer-langgraph", "aether-closer-adk"]);
+    if (!keep.has($("agent").value)) state.bundle = null;
     sweep();
   });
   $("scenario").addEventListener("change", () => {
-    const items = [...(state.meta.scenarios || []), ...state.extraScenarios];
+    const extra = selectedExtra();
+    if (extra) {
+      $("agent-task").textContent = extra.name;
+      sweep();
+      return;
+    }
+    const items = [...(state.meta.scenarios || []), ...extraItems()];
     const sc = items.find((s) => s.id === $("scenario").value);
     if (sc) $("agent-task").textContent = sc.name;
     sweep();
@@ -264,9 +311,17 @@
     try {
       const raw = JSON.parse($("paste-spec").value);
       state.bundle = raw.spec ? raw : { spec: raw, scenario: raw.scenario || {} };
-      $("agent").value = "pasted";
+      if ($("agent").value !== "aether-closer-langgraph" && $("agent").value !== "aether-closer-adk") {
+        $("agent").value = "pasted";
+      }
       $("agent-name").textContent = (state.bundle.spec && state.bundle.spec.name) || "pasted";
-      $("agent-fw").textContent = (state.bundle.spec && state.bundle.spec.framework) || "generic";
+      $("agent-fw").textContent =
+        $("agent").value === "aether-closer-langgraph"
+          ? "langgraph"
+          : $("agent").value === "aether-closer-adk"
+            ? "adk"
+            : (state.bundle.spec && state.bundle.spec.framework) || "generic";
+      fillScenarios();
       $("paste-hint").textContent = "Loaded. Recasting…";
       sweep();
     } catch (err) {
@@ -279,13 +334,21 @@
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ seed: Number($("seed").value) || 42, n: 5 }),
+        body: JSON.stringify({
+          seed: Number($("seed").value) || 42,
+          n: 5,
+          tools: (state.bundle && state.bundle.spec && state.bundle.spec.tools) || [],
+        }),
       });
       const drafts = await res.json();
-      state.extraScenarios = (drafts || []).map((d) => ({
-        id: d.id, name: (d.source || "gen") + ": " + d.name, objective: d.objective,
-      }));
+      state.extraScenarios = drafts || [];
       fillScenarios();
+      if (state.extraScenarios.length) {
+        $("scenario").value = state.extraScenarios[0].id;
+        const sc = state.extraScenarios[0];
+        if (sc && sc.name) $("agent-task").textContent = sc.name;
+      }
+      sweep();
     } finally {
       $("gen-scenarios").disabled = false;
     }
