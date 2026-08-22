@@ -37,6 +37,10 @@ type RemoteOpts struct {
 // AllowRemoteEndpointEnv lifts the loopback restriction on agent endpoints.
 const AllowRemoteEndpointEnv = "CRUCIBLE_ALLOW_REMOTE_ENDPOINT"
 
+// maxRunBody caps what a sidecar can return for one trial. A result is a small
+// object; a process that streams gigabytes at the runner is broken.
+const maxRunBody = 8 << 20
+
 // checkEndpoint refuses to POST a trial anywhere but the local machine.
 // spec.endpoint comes straight from the request body, so without this the run
 // API is an open proxy: point it at an internal service and the response comes
@@ -73,6 +77,14 @@ func allowRemoteEndpoint() bool {
 	}
 	return false
 }
+
+// ChamberError is a failure to run a trial rather than a verdict about the
+// agent: a sidecar that could not import the entry file, a callback that could
+// not be reached, a request the sidecar rejected. The harness reports these
+// separately so a broken interpreter does not read as a fragile agent.
+type ChamberError struct{ Msg string }
+
+func (e *ChamberError) Error() string { return e.Msg }
 
 // Remote is an agent.Agent that runs in the Python sidecar.
 type Remote struct {
@@ -191,16 +203,28 @@ func (r *Remote) Run(ctx context.Context, st agent.State, bus agent.Bus, rec *tr
 		return agent.Result{}, err
 	}
 	defer res.Body.Close()
-	slurp, _ := io.ReadAll(res.Body)
+	slurp, _ := io.ReadAll(io.LimitReader(res.Body, maxRunBody))
 	if res.StatusCode >= 300 {
-		return agent.Result{}, fmt.Errorf("runtime %d: %s", res.StatusCode, slurp)
+		// The agent never returned a verdict: either the sidecar could not
+		// start it, or it rejected our request. Both are ours to fix.
+		return agent.Result{}, &ChamberError{Msg: fmt.Sprintf("sidecar %d: %s", res.StatusCode, strings.TrimSpace(string(slurp)))}
 	}
 	var out RunResponse
 	if err := json.Unmarshal(slurp, &out); err != nil {
-		return agent.Result{}, err
+		return agent.Result{}, &ChamberError{Msg: fmt.Sprintf("sidecar sent unreadable JSON: %v", err)}
+	}
+	if out.ChamberError {
+		msg := out.Error
+		if msg == "" {
+			msg = "sidecar reported a chamber error with no detail"
+		}
+		return agent.Result{}, &ChamberError{Msg: msg}
 	}
 	if out.Error != "" && out.Claimed.Error == "" {
 		out.Claimed.Error = out.Error
+	}
+	if out.AgentError != "" {
+		rec.State("agent raised inside the sidecar", map[string]any{"traceback": out.AgentError})
 	}
 	if out.Checkpoint {
 		rec.State("checkpointer saved thread "+st.ThreadID, map[string]any{"runtime": out.Runtime})

@@ -31,6 +31,10 @@ def bind_cb(cb) -> None:
     _tls.cb = cb
 
 
+def clear_cb() -> None:
+    _tls.cb = None
+
+
 def is_langchain_tool(obj: Any) -> bool:
     if obj is None or inspect.isclass(obj):
         return False
@@ -114,35 +118,57 @@ def _emit_evidence(cb, name: str, res: dict) -> None:
     err = (res or {}).get("error") or ""
     data = (res or {}).get("data")
     empty = data is None or data == {} or data == []
-    if err == "permission_denied":
-        cb.state("write ignored permission_denied", {"tool": name})
-    if (res or {}).get("ok") and empty and _writeish(name):
-        cb.state("write accepted empty success payload", {"tool": name})
+    # Evidence is a side note. If the chamber cannot be reached the tool result
+    # still stands, and raising here would turn a lost log line into a failure.
+    try:
+        if err == "permission_denied":
+            cb.state("write ignored permission_denied", {"tool": name})
+        if (res or {}).get("ok") and empty and _writeish(name):
+            cb.state("write accepted empty success payload", {"tool": name})
+    except Exception:
+        pass
 
 
-def wrap_callable(fn, name: str, cb):
+def wrap_callable(fn, name: str, cb=None):
     if fn is None or getattr(fn, "_crucible_wrapped", False):
         return fn
 
     def wrapped(*args, **kwargs):
         from . import httpio
 
+        # Resolve the chamber at call time, not at wrap time. A tool object that
+        # lives in a module the entry file imports is wrapped once and cached by
+        # sys.modules for the whole suite; a captured callback would send every
+        # later trial's tool calls to the first trial's bus and token.
+        chamber = current_cb() or cb
         payload = _bind_args(fn, args, kwargs)
-        if hasattr(cb, "before"):
-            cb.before(name)
+        if hasattr(chamber, "before"):
+            chamber.before(name)
         if httpio.active():
             before = httpio.hits()
             try:
                 with httpio.using_tool(name):
                     out = fn(*args, **kwargs)
-            except Exception:
+            except Exception as e:
                 if httpio.hits() > before:
                     raise
+                # The body failed before it reached the network, so the chamber
+                # answers instead. Say so: silently substituting a synthetic
+                # success made the agent's own crash invisible in the timeline
+                # and scored the trial as though the tool had worked.
+                if hasattr(chamber, "state"):
+                    try:
+                        chamber.state(
+                            "tool body raised before any I/O; chamber answered instead",
+                            {"tool": name, "error": f"{type(e).__name__}: {e}"},
+                        )
+                    except Exception:
+                        pass
             else:
                 if httpio.hits() > before:
                     return out if out is not None else present(httpio.last_result() or {})
-        res = cb.tool(name, payload) if hasattr(cb, "tool") else {}
-        _emit_evidence(cb, name, res)
+        res = chamber.tool(name, payload) if hasattr(chamber, "tool") else {}
+        _emit_evidence(chamber, name, res)
         return present(res)
 
     wrapped._crucible_wrapped = True  # type: ignore[attr-defined]

@@ -10,9 +10,23 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import threading
 from typing import Any
 
 from . import intercept
+
+# load_module rewrites sys.path and sys.modules under a fixed name, so two
+# trials importing at once would race over the same slot.
+_import_lock = threading.Lock()
+
+
+class EntryError(RuntimeError):
+    """The chamber could not load the agent file at all.
+
+    Distinct from anything the agent's own code does once loaded: a missing
+    file or a bad export is the harness failing to start a trial, and scoring
+    it as an agent failure would quietly lower every survival number.
+    """
 
 
 def has_entry(req: dict) -> bool:
@@ -47,30 +61,36 @@ def resolve_entry(entry: str) -> str:
 
 def load_module(entry: str):
     path = resolve_entry(entry)
-    folder = os.path.dirname(path)
-    if folder and folder not in sys.path:
-        sys.path.insert(0, folder)
-    name = "crucible_entry_" + os.path.splitext(os.path.basename(path))[0]
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load {path}")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
+    with _import_lock:
+        folder = os.path.dirname(path)
+        if folder and folder not in sys.path:
+            sys.path.insert(0, folder)
+        name = "crucible_entry_" + os.path.splitext(os.path.basename(path))[0]
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {path}")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+        return mod
 
 
 def run(cb, req: dict) -> dict:
     spec = req.get("spec") or {}
     entry = req.get("entry") or spec.get("entry")
     export = req.get("export") or spec.get("export") or ""
-    mod = load_module(entry)
+    try:
+        mod = load_module(entry)
+    except EntryError:
+        raise
+    except Exception as e:
+        raise EntryError(f"cannot load {entry!r}: {type(e).__name__}: {e}") from e
     intercept.wrap_module(mod, cb, spec)
 
     if export:
         obj = getattr(mod, export, None)
         if obj is None:
-            raise AttributeError(f"{entry} has no export {export!r}")
+            raise EntryError(f"{entry} has no export {export!r}")
         if export == "build" or getattr(obj, "__name__", "") == "build":
             return _invoke_graph(_call_build(obj, cb), req, cb)
         if callable(obj):
@@ -84,8 +104,8 @@ def run(cb, req: dict) -> dict:
         if getattr(mod, attr, None) is not None:
             return _invoke_graph(getattr(mod, attr), req, cb)
     if getattr(mod, "root_agent", None) is not None or getattr(mod, "agent", None) is not None:
-        raise RuntimeError(f"{entry} exported an agent but no run() — add run(req)")
-    raise RuntimeError(f"{entry} has no run/build/graph export")
+        raise EntryError(f"{entry} exported an agent but no run() — add run(req)")
+    raise EntryError(f"{entry} has no run/build/graph export")
 
 
 def _call_build(fn, cb):

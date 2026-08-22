@@ -366,6 +366,10 @@ func infraErr(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
+	var chamber *runtime.ChamberError
+	if errors.As(err, &chamber) {
+		return true
+	}
 	var netErr net.Error
 	if errors.As(err, &netErr) {
 		return true
