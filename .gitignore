@@ -1,0 +1,6 @@
+/crucible
+/bin/
+*.test
+*.out
+.DS_Store
+dist/

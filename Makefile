@@ -1,0 +1,24 @@
+.PHONY: test run serve replay fmt vet
+
+BIN := crucible
+
+fmt:
+	gofmt -w $(shell find . -name '*.go' -not -path './.git/*')
+
+vet:
+	go vet ./...
+
+test:
+	go test ./...
+
+build:
+	go build -o $(BIN) ./cmd/crucible
+
+serve: build
+	./$(BIN) serve -addr :8080
+
+run: build
+	./$(BIN) run -seed 42 -trials 40 -p 0.3
+
+replay: build
+	./$(BIN) replay -seed 42 -trial 0 -p 0.3
