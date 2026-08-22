@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/a-barwick/agent-crucible/internal/clock"
 	"github.com/a-barwick/agent-crucible/internal/trace"
@@ -109,28 +110,5 @@ func ParseIntent(objective string) Intent {
 }
 
 func containsFold(s, sub string) bool {
-	return len(s) >= len(sub) && indexFold(s, sub) >= 0
-}
-
-func indexFold(s, sub string) int {
-	// ASCII fold is enough for the fixture copy.
-	ls := []byte(s)
-	lb := []byte(sub)
-	for i := range ls {
-		if ls[i] >= 'A' && ls[i] <= 'Z' {
-			ls[i] += 32
-		}
-	}
-	for i := range lb {
-		if lb[i] >= 'A' && lb[i] <= 'Z' {
-			lb[i] += 32
-		}
-	}
-	ss, sb := string(ls), string(lb)
-	for i := 0; i+len(sb) <= len(ss); i++ {
-		if ss[i:i+len(sb)] == sb {
-			return i
-		}
-	}
-	return -1
+	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
 }

@@ -53,6 +53,16 @@ func TestCollapseAtThirty(t *testing.T) {
 	}
 }
 
+func TestDemoSeed42Locked(t *testing.T) {
+	s := Run(context.Background(), Config{Seed: 42, Trials: 40, P: 0.30, Faults: fault.MVP})
+	if s.Survival != 0.35 {
+		t.Fatalf("demo survival drifted: got %v want 0.35 counts=%v", s.Survival, s.Counts)
+	}
+	if s.Counts["completed"] != 4 || s.Counts["recovered"] != 10 {
+		t.Fatalf("demo mix drifted: %v", s.Counts)
+	}
+}
+
 func TestSweepMonotonicSurvival(t *testing.T) {
 	sw := RunSweep(context.Background(), Config{Seed: 42, Trials: 20, Faults: fault.MVP}, 0.30, 0.10)
 	if len(sw.Suites) < 4 {
