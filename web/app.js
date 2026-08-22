@@ -399,6 +399,7 @@
           body: JSON.stringify(payload()),
         });
         if (state.selected >= trialCount()) state.selected = 0;
+        adoptSweepStep(state.sweep);
         renderSuite();
       } catch (err) {
         state.sweep = null;
@@ -419,9 +420,28 @@
 
   function onSlider() {
     state.p = Number($("p-slider").value);
+    showP();
+    renderSuite();
+  }
+
+  function showP() {
     $("p-value").textContent = state.p + "%";
     $("p-hint").textContent = heatWord(state.p);
-    renderSuite();
+  }
+
+  // adoptSweepStep makes the slider offer only the probabilities that were
+  // actually run. A sidecar sweep pays for each suite with a fresh set of trials
+  // in another process, so the server coarsens the step; the slider kept its 1%
+  // notches regardless, and picking 14% of a sweep taken every 5% showed the
+  // nearest suite under a caption reading p=15%.
+  function adoptSweepStep(sweep) {
+    const pct = Math.round((sweep.step || 0.01) * 100) || 1;
+    const el = $("p-slider");
+    if (Number(el.step) === pct) return;
+    el.step = String(pct);
+    state.p = Math.round(state.p / pct) * pct;
+    el.value = String(state.p);
+    showP();
   }
 
   // esc escapes quotes as well as angle brackets: some of these strings land in
