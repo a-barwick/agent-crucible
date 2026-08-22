@@ -228,6 +228,11 @@
       .join("");
 
     const tiles = $("tiles");
+    // Selecting a tile re-renders the whole grid, which destroys the button the
+    // keyboard was on and drops focus to the document. The first Enter worked
+    // and every key after it went nowhere -- Space scrolled the page -- so the
+    // grid was mouse-only in practice. Put focus back where the user left it.
+    const refocus = document.activeElement && document.activeElement.classList.contains("tile");
     tiles.innerHTML = "";
     trials.forEach((t) => {
       const b = document.createElement("button");
@@ -245,6 +250,10 @@
       });
       tiles.append(b);
     });
+    if (refocus) {
+      const sel = tiles.querySelector(".tile.sel") || tiles.firstElementChild;
+      if (sel) sel.focus({ preventScroll: true });
+    }
     $("tile-caption").textContent = trials.length ? `trial 0–${trials[trials.length - 1].n}` : "no trials";
 
     const curve = $("curve");
