@@ -14,6 +14,7 @@ runtime:
 test:
 	go test ./...
 	PYTHONPATH=runtime python3 -m crucible_rt smoke
+	node runtime/js/selftest.mjs
 
 build:
 	go build -o $(BIN) ./cmd/crucible

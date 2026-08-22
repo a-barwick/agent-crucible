@@ -274,11 +274,14 @@ func TestNativeJSClean(t *testing.T) {
 	s := Run(context.Background(), Config{
 		Seed: 3, Trials: 2, P: 0, Agent: agent.IDNativeJS, Faults: fault.MVP,
 	})
+	if s.Errored > 0 {
+		t.Fatalf("node sidecar could not run %d/%d trials: %s", s.Errored, len(s.Trials), s.Error)
+	}
 	if s.Survival != 1 {
-		t.Fatalf("native js survival %v counts=%v", s.Survival, s.Counts)
 		for _, tr := range s.Trials {
 			t.Logf("trial %d %s %s %v", tr.N, tr.Outcome, tr.Reason, tr.Violations)
 		}
+		t.Fatalf("native js survival %v counts=%v", s.Survival, s.Counts)
 	}
 }
 
