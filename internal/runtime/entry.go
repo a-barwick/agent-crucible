@@ -1,20 +1,79 @@
 package runtime
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
-// FindEntry resolves a user agent file relative to cwd, the repo root,
-// or examples/. The sidecar imports whatever path this returns.
+// AllowAnyEntryEnv opts out of the sandbox below. It exists for the case where
+// the operator really does keep agent files outside the working tree; set it
+// only when nothing untrusted can reach the API.
+const AllowAnyEntryEnv = "CRUCIBLE_ALLOW_ANY_ENTRY"
+
+// FindEntry resolves a user agent file relative to cwd, the repo root, or
+// examples/. The sidecar imports whatever path this returns, and spec.entry can
+// arrive from an HTTP request, so the result is confined to the roots below:
+// otherwise POST /api/run with {"spec":{"entry":"/etc/cron.d/x"}} is remote code
+// execution. Set CRUCIBLE_ALLOW_ANY_ENTRY to lift the confinement.
 func FindEntry(entry string) string {
-	if entry == "" {
-		return ""
-	}
-	if filepath.IsAbs(entry) && fileExists(entry) {
+	p, err := ResolveEntry(entry)
+	if err != nil {
+		// Return the input so the sidecar reports "no such file" rather than
+		// the caller silently running some other agent.
 		return entry
 	}
+	return p
+}
+
+// ResolveEntry is FindEntry with the reason it refused.
+func ResolveEntry(entry string) (string, error) {
+	entry = strings.TrimSpace(entry)
+	if entry == "" {
+		return "", fmt.Errorf("empty entry")
+	}
+	if strings.ContainsAny(entry, "\x00\n\r") {
+		return "", fmt.Errorf("entry contains control characters")
+	}
+	roots := entryRoots()
+	for _, c := range candidates(entry) {
+		if !fileExists(c) {
+			continue
+		}
+		abs, err := filepath.Abs(c)
+		if err != nil {
+			continue
+		}
+		// Resolve symlinks before checking: a link inside examples/ pointing
+		// at /etc would otherwise pass.
+		real, err := filepath.EvalSymlinks(abs)
+		if err != nil {
+			real = abs
+		}
+		if !underAny(real, roots) {
+			continue
+		}
+		return abs, nil
+	}
+	if unconfined() {
+		for _, c := range candidates(entry) {
+			if fileExists(c) {
+				if abs, err := filepath.Abs(c); err == nil {
+					return abs, nil
+				}
+				return c, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("entry %q not found under the working tree, the repo root, or examples/", entry)
+}
+
+func candidates(entry string) []string {
 	var cands []string
+	if filepath.IsAbs(entry) {
+		cands = append(cands, entry)
+	}
 	if wd, err := os.Getwd(); err == nil {
 		dir := wd
 		for i := 0; i < 8; i++ {
@@ -37,16 +96,53 @@ func FindEntry(entry string) string {
 			filepath.Join(root, entry),
 		)
 	}
-	for _, c := range cands {
-		if fileExists(c) {
-			abs, err := filepath.Abs(c)
-			if err == nil {
-				return abs
+	return cands
+}
+
+// entryRoots is where an agent file is allowed to live: the working directory
+// and the repo checkout. Both are places the operator already controls.
+func entryRoots() []string {
+	var roots []string
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if abs, err := filepath.Abs(p); err == nil {
+			if real, err := filepath.EvalSymlinks(abs); err == nil {
+				abs = real
 			}
-			return c
+			roots = append(roots, abs)
 		}
 	}
-	return entry
+	if wd, err := os.Getwd(); err == nil {
+		add(wd)
+	}
+	add(FindRepoRoot())
+	for _, extra := range filepath.SplitList(os.Getenv("CRUCIBLE_ENTRY_ROOTS")) {
+		add(extra)
+	}
+	return roots
+}
+
+func underAny(path string, roots []string) bool {
+	for _, root := range roots {
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			continue
+		}
+		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func unconfined() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(AllowAnyEntryEnv))) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
 }
 
 func FindRepoRoot() string {

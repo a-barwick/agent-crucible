@@ -464,7 +464,10 @@ func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent
 	if cfg.Bundle != nil && (name == "" || name == agent.IDPasted) {
 		name = agent.IDPasted
 	}
-	spec := hydrateSpec(cfg)
+	spec, err := hydrateSpec(cfg)
+	if err != nil {
+		return nil, err
+	}
 
 	if spec != nil && spec.Endpoint != "" {
 		kind := spec.Runtime
@@ -549,7 +552,12 @@ func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent
 	}
 }
 
-func hydrateSpec(cfg Config) *agent.Spec {
+// hydrateSpec overlays the catalog preset for a known agent id and resolves
+// spec.Entry to a real file. Resolution can fail — the entry may not exist, or
+// may sit outside the roots the runtime is willing to import from — and that is
+// a hard error rather than something to paper over, because the alternative is
+// handing an unchecked path to a Python import.
+func hydrateSpec(cfg Config) (*agent.Spec, error) {
 	spec := specOf(cfg)
 	switch cfg.Agent {
 	case agent.IDTicketLangGraph, agent.IDNativeLangGraph:
@@ -568,11 +576,15 @@ func hydrateSpec(cfg Config) *agent.Spec {
 		spec = overlaySpec(agent.ForeignHTTPSpec(), spec)
 	}
 	if spec != nil && spec.Entry != "" {
+		resolved, err := runtime.ResolveEntry(spec.Entry)
+		if err != nil {
+			return nil, err
+		}
 		cp := *spec
-		cp.Entry = runtime.FindEntry(spec.Entry)
+		cp.Entry = resolved
 		spec = &cp
 	}
-	return spec
+	return spec, nil
 }
 
 func overlaySpec(base agent.Spec, over *agent.Spec) *agent.Spec {
@@ -614,7 +626,9 @@ func overlaySpec(base agent.Spec, over *agent.Spec) *agent.Spec {
 }
 
 func toolNames(cfg Config) []string {
-	spec := hydrateSpec(cfg)
+	// A spec whose entry does not resolve still declares tools, and the caller
+	// only wants the names; resolveAgent reports the real failure.
+	spec, _ := hydrateSpec(cfg)
 	if spec == nil || len(spec.Tools) == 0 {
 		if agent.IsDropIn(cfg.Agent, spec) {
 			spec = overlaySpec(agent.TicketLangGraphSpec(), spec)

@@ -8,8 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
-	"time"
+	"net/url"
+	"os"
+	"strings"
 
 	"github.com/a-barwick/agent-crucible/internal/agent"
 	"github.com/a-barwick/agent-crucible/internal/trace"
@@ -31,6 +34,46 @@ type RemoteOpts struct {
 	Spec *agent.Spec
 }
 
+// AllowRemoteEndpointEnv lifts the loopback restriction on agent endpoints.
+const AllowRemoteEndpointEnv = "CRUCIBLE_ALLOW_REMOTE_ENDPOINT"
+
+// checkEndpoint refuses to POST a trial anywhere but the local machine.
+// spec.endpoint comes straight from the request body, so without this the run
+// API is an open proxy: point it at an internal service and the response comes
+// back inside the trial. Set CRUCIBLE_ALLOW_REMOTE_ENDPOINT for a real remote
+// sidecar on a network you trust.
+func checkEndpoint(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("bad agent endpoint %q: %w", raw, err)
+	}
+	switch u.Scheme {
+	case "http", "https":
+	default:
+		return fmt.Errorf("agent endpoint must be http or https, got %q", u.Scheme)
+	}
+	if allowRemoteEndpoint() {
+		return nil
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("agent endpoint %q is not loopback; set %s to allow it", raw, AllowRemoteEndpointEnv)
+}
+
+func allowRemoteEndpoint() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(AllowRemoteEndpointEnv))) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
+}
+
 // Remote is an agent.Agent that runs in the Python sidecar.
 type Remote struct {
 	Kind   string
@@ -40,25 +83,27 @@ type Remote struct {
 }
 
 func NewRemote(ctx context.Context, opts RemoteOpts) (*Remote, error) {
-	url := opts.URL
-	if url == "" && opts.Spec != nil {
-		url = opts.Spec.Endpoint
+	target := opts.URL
+	if target == "" && opts.Spec != nil {
+		target = opts.Spec.Endpoint
 	}
 	js := jsOpts(opts)
-	if url == "" {
+	if target == "" {
 		if js {
 			p, err := EnsureNode(ctx)
 			if err != nil {
 				return nil, err
 			}
-			url = p.URL
+			target = p.URL
 		} else {
 			p, err := EnsureLocal(ctx)
 			if err != nil {
 				return nil, err
 			}
-			url = p.URL
+			target = p.URL
 		}
+	} else if err := checkEndpoint(target); err != nil {
+		return nil, err
 	}
 	kind := opts.Kind
 	if kind == "" && opts.Spec != nil {
@@ -72,9 +117,12 @@ func NewRemote(ctx context.Context, opts RemoteOpts) (*Remote, error) {
 	}
 	return &Remote{
 		Kind:   kind,
-		URL:    url,
+		URL:    target,
 		SpecIn: opts.Spec,
-		cli:    &http.Client{Timeout: 20 * time.Second},
+		// No client timeout: the caller's context already carries the trial
+		// deadline, and a shorter fixed timeout here would cut off runs the
+		// CLI explicitly allowed 120s for.
+		cli: &http.Client{},
 	}, nil
 }
 
@@ -99,12 +147,14 @@ func (r *Remote) Spec() agent.Spec {
 }
 
 func (r *Remote) Run(ctx context.Context, st agent.State, bus agent.Bus, rec *trace.Recorder, hook agent.Hook) (agent.Result, error) {
-	cb, err := NewCallback()
+	cb, err := Shared()
 	if err != nil {
 		return agent.Result{}, err
 	}
-	defer cb.Close()
-	tok := newToken()
+	tok, err := newToken()
+	if err != nil {
+		return agent.Result{}, err
+	}
 	cb.Register(tok, &Session{Ctx: ctx, Bus: bus, Hook: hook, Rec: rec, St: &st})
 	defer cb.Unregister(tok)
 
@@ -163,8 +213,12 @@ func (r *Remote) Run(ctx context.Context, st agent.State, bus agent.Bus, rec *tr
 	}, nil
 }
 
-func newToken() string {
+// newToken is the sidecar's only credential for calling back into a trial, so
+// a short read must be an error rather than a predictable all-zero token.
+func newToken() (string, error) {
 	var b [16]byte
-	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("callback token: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
 }

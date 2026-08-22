@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -12,6 +14,29 @@ func TestFindEntryTicketGraph(t *testing.T) {
 	}
 	if !fileExists(got) {
 		t.Fatalf("missing %s", got)
+	}
+}
+
+func TestResolveEntryRefusesFilesOutsideTheTree(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "evil.py")
+	if err := os.WriteFile(outside, []byte("import os\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []string{outside, "/etc/passwd", "../../../../etc/passwd"} {
+		if got, err := ResolveEntry(entry); err == nil {
+			t.Fatalf("ResolveEntry(%q) should have refused, got %q", entry, got)
+		}
+		// FindEntry hands the raw string back so the sidecar fails to import
+		// it, rather than resolving to some other agent file.
+		if got := FindEntry(entry); got != entry {
+			t.Fatalf("FindEntry(%q) = %q, want the input back", entry, got)
+		}
+	}
+}
+
+func TestResolveEntryRefusesControlCharacters(t *testing.T) {
+	if _, err := ResolveEntry("examples/native_ticket.py\x00"); err == nil {
+		t.Fatal("expected a refusal for a NUL in the path")
 	}
 }
 
