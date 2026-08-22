@@ -6,8 +6,11 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
+	"net"
+	"net/url"
 
 	"github.com/a-barwick/agent-crucible/internal/agent"
 	"github.com/a-barwick/agent-crucible/internal/ai"
@@ -89,6 +92,13 @@ type Trial struct {
 	Intent     agent.Intent  `json:"intent"`
 	Claimed    agent.Claim   `json:"claimed"`
 	Events     []trace.Event `json:"events"`
+	// Decisions is every die roll the injector made, whether or not it fired.
+	// It is the audit trail behind the timeline: same seed, same decisions.
+	Decisions []fault.Decision `json:"decisions,omitempty"`
+	// Error is set when the chamber itself could not run the trial — no
+	// sidecar, no entry file, a cancelled context. It is not an agent verdict
+	// and does not count against survival.
+	Error string `json:"error,omitempty"`
 }
 
 type Suite struct {
@@ -104,6 +114,12 @@ type Suite struct {
 	ByFault   []cluster.Cluster `json:"by_fault"`
 	Critique  critique.Critique `json:"critique"`
 	Trials    []Trial           `json:"trials"`
+	// Scored is how many trials produced a verdict; Errored is how many the
+	// chamber could not run. Survival and Safety are over Scored, so a broken
+	// sidecar reads as a broken sidecar instead of a fragile agent.
+	Scored  int    `json:"scored"`
+	Errored int    `json:"errored"`
+	Error   string `json:"error,omitempty"`
 }
 
 type Sweep struct {
@@ -114,15 +130,32 @@ type Sweep struct {
 
 func Run(ctx context.Context, cfg Config) Suite {
 	cfg = cfg.withDefaults()
-	trials := make([]Trial, cfg.Trials)
-	refs := make([]cluster.TrialRef, cfg.Trials)
+	var trials []Trial
+	var refs []cluster.TrialRef
 	counts := map[string]int{}
-	var done, safe, cleanN, cleanOK int
+	var done, safe, cleanN, cleanOK, scored, errored int
+	var firstErr string
 
 	for i := 0; i < cfg.Trials; i++ {
+		if err := ctx.Err(); err != nil {
+			// The caller's deadline passed. Report the trials we actually ran
+			// rather than grinding through the rest past the deadline.
+			if firstErr == "" {
+				firstErr = err.Error()
+			}
+			break
+		}
 		tr := runOne(ctx, cfg, i)
-		trials[i] = tr
-		refs[i] = cluster.TrialRef{N: tr.N, Outcome: tr.Outcome, Faults: tr.Faults, Violations: tr.Violations}
+		trials = append(trials, tr)
+		if tr.Error != "" {
+			errored++
+			if firstErr == "" {
+				firstErr = tr.Error
+			}
+			continue
+		}
+		scored++
+		refs = append(refs, cluster.TrialRef{N: tr.N, Outcome: tr.Outcome, Faults: tr.Faults, Violations: tr.Violations})
 		counts[string(tr.Outcome)]++
 		if tr.Completed {
 			done++
@@ -138,7 +171,7 @@ func Run(ctx context.Context, cfg Config) Suite {
 		}
 	}
 
-	surv := ratio(done, cfg.Trials)
+	surv := ratio(done, scored)
 	clean := 1.0
 	if cleanN > 0 {
 		clean = ratio(cleanOK, cleanN)
@@ -147,9 +180,12 @@ func Run(ctx context.Context, cfg Config) Suite {
 	byFault := cluster.ByFault(refs)
 	samples := make([]ai.Evidence, 0, len(trials))
 	for _, tr := range trials {
+		if tr.Error != "" {
+			continue
+		}
 		var evs []string
 		for _, e := range tr.Events {
-			if e.Kind == "state" || e.Kind == "fault" {
+			if e.Kind == trace.KindState || e.Kind == trace.KindFault {
 				evs = append(evs, e.Message)
 			}
 		}
@@ -159,7 +195,7 @@ func Run(ctx context.Context, cfg Config) Suite {
 		})
 	}
 	crit := ai.Explain(ctx, ai.ExplainInput{
-		Trials:   cfg.Trials,
+		Trials:   scored,
 		P:        cfg.P,
 		Survival: surv,
 		Clean:    clean,
@@ -177,13 +213,16 @@ func Run(ctx context.Context, cfg Config) Suite {
 		Agent:     cfg.Agent,
 		Scenario:  cfg.Scenario,
 		Survival:  surv,
-		Safety:    ratio(safe, cfg.Trials),
+		Safety:    ratio(safe, scored),
 		CleanRate: clean,
 		Counts:    counts,
 		Clusters:  shapes,
 		ByFault:   byFault,
 		Critique:  crit,
 		Trials:    trials,
+		Scored:    scored,
+		Errored:   errored,
+		Error:     firstErr,
 	}
 }
 
@@ -196,9 +235,15 @@ func RunSweep(ctx context.Context, cfg Config, maxP, step float64) Sweep {
 		step = 0.01
 	}
 	var suites []Suite
-	for p := 0.0; p <= maxP+1e-9; p += step {
+	// Count in whole steps instead of accumulating a float: 0.1 added thirty
+	// times is not 3.0, and the drift decides whether the last suite runs.
+	steps := int(math.Floor(maxP/step + 1e-9))
+	for i := 0; i <= steps; i++ {
+		if ctx.Err() != nil {
+			break
+		}
 		c := cfg
-		c.P = round2(p)
+		c.P = round2(float64(i) * step)
 		suites = append(suites, Run(ctx, c))
 	}
 	return Sweep{Config: cfg, Step: step, Suites: suites}
@@ -229,6 +274,10 @@ func runOne(ctx context.Context, cfg Config, n int) Trial {
 	tr := trace.New()
 	rec := tr.Recorder(clk.Now)
 	inj := fault.New(r, cfg.P, cfg.Faults)
+	// "Budget trips halfway through" only holds if the budget scales with the
+	// graph. A fixed budget of three never trips on a two-tool agent, which
+	// silently made cost_ceiling unreachable for every drop-in.
+	inj.SetCostBudget(costBudget(len(toolNames(cfg))))
 	saver := agent.NewMemorySaver()
 
 	st := agent.State{
@@ -253,21 +302,26 @@ func runOne(ctx context.Context, cfg Config, n int) Trial {
 		rec.Fault(fault.ContextPressure, "context", "flooded state with lookalike company mentions")
 	}
 	if d := inj.Decide(fault.SitePreflight, "budget", fault.CostCeiling); d.Fired && d.Type == fault.CostCeiling {
-		rec.Fault(fault.CostCeiling, "budget", "cost ceiling armed; tools after the midpoint will refuse")
+		// Armed, not fired: the budget only becomes a fault once a tool call
+		// actually trips it, which the bus records. Counting the arming here
+		// would attribute a cost-ceiling failure to trials that never hit one.
+		rec.State("cost ceiling armed", map[string]any{"budget": fault.DefaultCostBudget})
 	}
 
 	hook := &nodeHook{inj: inj, alt: scn.AltObjective}
 	bus := &agent.FaultBus{World: w, Inj: inj, Rec: rec, Clock: clk}
 	ag, err := resolveAgent(ctx, cfg, clk, saver)
 	if err != nil {
-		res := agent.Result{Claimed: agent.Claim{Error: err.Error()}}
-		v := judge.Judge(scn.Expect, w, tr, res)
-		rec.Add(trace.Event{Kind: trace.KindVerdict, Message: "failed: " + err.Error()})
-		return Trial{N: n, Outcome: v.Outcome, Reason: err.Error(), Events: tr.Events}
+		return errTrial(n, tr, rec, clk, err)
 	}
 	res, err := ag.Run(ctx, st, bus, rec, hook)
-	if err != nil && res.Claimed.Error == "" {
-		res.Claimed.Error = err.Error()
+	if err != nil {
+		if infraErr(err) {
+			return errTrial(n, tr, rec, clk, err)
+		}
+		if res.Claimed.Error == "" {
+			res.Claimed.Error = err.Error()
+		}
 	}
 
 	v := judge.Judge(scn.Expect, w, tr, res)
@@ -293,7 +347,31 @@ func runOne(ctx context.Context, cfg Config, n int) Trial {
 		Intent:     res.Intent,
 		Claimed:    res.Claimed,
 		Events:     tr.Events,
+		Decisions:  inj.Decisions(),
 	}
+}
+
+// errTrial records a trial the chamber could not run. It carries no verdict:
+// a missing sidecar is not evidence about the agent's architecture, and
+// scoring it as "failed" would quietly depress every survival number.
+func errTrial(n int, tr *trace.Trace, rec *trace.Recorder, clk *clock.Clock, err error) Trial {
+	rec.Add(trace.Event{Kind: trace.KindVerdict, Message: "chamber error: " + err.Error()})
+	return Trial{N: n, Reason: err.Error(), Error: err.Error(), Ticks: clk.Now(), Events: tr.Events}
+}
+
+// infraErr reports whether the agent failed to run at all, as opposed to
+// running and reaching a bad state. Cancellation and transport errors are the
+// chamber's problem; anything the agent's own nodes returned is a verdict.
+func infraErr(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var uerr *url.Error
+	return errors.As(err, &uerr)
 }
 
 type nodeHook struct {
@@ -553,6 +631,15 @@ func toolNames(cfg Config) []string {
 		out = append(out, t.Name)
 	}
 	return out
+}
+
+// costBudget is half the declared tool surface, rounded up, so the ceiling
+// lands mid-run whether the agent advertises two tools or twelve.
+func costBudget(tools int) int {
+	if tools < 2 {
+		return 1
+	}
+	return (tools + 1) / 2
 }
 
 func ratio(n, d int) float64 {

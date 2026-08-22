@@ -1,15 +1,19 @@
 // Package fault is the deterministic injection layer.
 //
-// The runner, not a model, decides whether a fault fires. Every decision
-// site draws the same number of random values regardless of p, so raising
-// the failure probability on a fixed seed only adds faults — it never
-// reshuffles the ensemble.
+// The runner, not a model, decides whether a fault fires. Each decision site
+// draws from its own sub-stream keyed by (site, target, visit count), so the
+// (u, kind) pair a site sees depends only on the seed and on how many times
+// that site has been reached — never on how many draws happened elsewhere.
+// Raising the failure probability on a fixed seed therefore only adds faults:
+// a site that fired at p stays fired at any p' > p, and the ensemble does not
+// reshuffle even when a fault changes the agent's path.
 package fault
 
 import (
 	"math/rand"
 	"sort"
 
+	"github.com/a-barwick/agent-crucible/internal/rng"
 	"github.com/a-barwick/agent-crucible/internal/schema"
 )
 
@@ -110,27 +114,49 @@ func (t Type) Blurb() string {
 }
 
 // Decision is one injection at one site. Empty Type means the site was clean.
+//
+// Site, Target and Visit together identify the sub-stream the draw came from,
+// which is what makes a suite auditable: the same three values on the same seed
+// always yield the same U and Type, whatever else the run did.
 type Decision struct {
 	Type   Type    `json:"type,omitempty"`
 	U      float64 `json:"u"`
 	Fired  bool    `json:"fired"`
 	Site   Site    `json:"site"`
 	Target string  `json:"target,omitempty"`
+	Visit  int     `json:"visit"`
 }
 
-// Injector is bound to one trial's RNG stream.
+// DefaultCostBudget is how many tool calls a trial gets once the cost
+// ceiling is armed. Everything after this refuses to run.
+const DefaultCostBudget = 3
+
+// Injector is bound to one trial. It derives a sub-stream per decision site
+// rather than consuming one shared stream, so p stays a pure gate.
 type Injector struct {
-	rng     *rand.Rand
+	base    int64
 	p       float64
 	enabled map[Type]bool
 	order   []Type
+	visits  map[string]int
+	log     []Decision
 
 	costArmed  bool
 	toolsSeen  int
 	costBudget int
 }
 
+// New derives the injector's sub-stream seed from r. r is not read again, so
+// the caller's stream stays untouched no matter how many sites are visited.
 func New(r *rand.Rand, p float64, enabled []Type) *Injector {
+	var base int64
+	if r != nil {
+		base = r.Int63()
+	}
+	return NewWithSeed(base, p, enabled)
+}
+
+func NewWithSeed(seed int64, p float64, enabled []Type) *Injector {
 	if p < 0 {
 		p = 0
 	}
@@ -148,26 +174,48 @@ func New(r *rand.Rand, p float64, enabled []Type) *Injector {
 		}
 	}
 	sort.Slice(order, func(i, j int) bool { return order[i] < order[j] })
-	return &Injector{rng: r, p: p, enabled: m, order: order, costBudget: 3}
+	return &Injector{
+		base: seed, p: p, enabled: m, order: order,
+		visits: map[string]int{}, costBudget: DefaultCostBudget,
+	}
 }
 
 func (in *Injector) Enabled() []Type { return append([]Type(nil), in.order...) }
 
 func (in *Injector) P() float64 { return in.p }
 
-// Decide draws (u, kind) even when nothing fires, so p only gates application.
+// SetCostBudget overrides how many tool calls survive an armed cost ceiling.
+func (in *Injector) SetCostBudget(n int) {
+	if n > 0 {
+		in.costBudget = n
+	}
+}
+
+// Decide draws (u, kind) from this site's own sub-stream even when nothing
+// fires, so p only gates application and never shifts another site's draw.
 func (in *Injector) Decide(site Site, target string, extra ...Type) Decision {
 	applicable := in.applicable(site, extra...)
 	if len(applicable) == 0 {
 		return Decision{Site: site, Target: target}
 	}
-	u := in.rng.Float64()
-	kind := applicable[in.rng.Intn(len(applicable))]
-	d := Decision{Type: kind, U: u, Site: site, Target: target, Fired: u < in.p}
+	key := string(site) + "|" + target
+	n := in.visits[key]
+	in.visits[key] = n + 1
+	r := rng.Sub(in.base, key, n)
+	u := r.Float64()
+	kind := applicable[r.Intn(len(applicable))]
+	d := Decision{Type: kind, U: u, Site: site, Target: target, Visit: n, Fired: u < in.p}
 	if d.Fired && kind == CostCeiling {
 		in.costArmed = true
 	}
+	in.log = append(in.log, d)
 	return d
+}
+
+// Decisions is every draw this injector made, in order. Sites that had no
+// applicable fault are not recorded because they never drew.
+func (in *Injector) Decisions() []Decision {
+	return append([]Decision(nil), in.log...)
 }
 
 func (in *Injector) applicable(site Site, extra ...Type) []Type {
@@ -198,6 +246,8 @@ func contains(ts []Type, t Type) bool {
 func (in *Injector) NoteToolCall() {
 	in.toolsSeen++
 }
+
+func (in *Injector) CostArmed() bool { return in.costArmed }
 
 func (in *Injector) CostExceeded() bool {
 	return in.costArmed && in.toolsSeen > in.costBudget
@@ -237,10 +287,10 @@ func ApplyToolSpec(d Decision, tool string, raw schema.Result, spec []schema.Too
 				"perm": perm, "allowed": false,
 			}}}
 		}
-		if schema.IsWriteLike(tool) {
-			return ToolEffect{SkipWorld: true, Result: schema.Result{OK: false, Error: "permission_denied"}}
-		}
-		return ToolEffect{Result: raw}
+		// Every other tool — reads included — comes back 403. A permission
+		// fault that silently returned the real payload would be recorded as
+		// fired while changing nothing the agent could react to.
+		return ToolEffect{SkipWorld: true, Result: schema.Result{OK: false, Error: "permission_denied"}}
 	case Malformed:
 		return ToolEffect{Result: stripRequired(tool, raw, spec)}
 	case Duplicate:

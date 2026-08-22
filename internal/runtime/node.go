@@ -57,7 +57,7 @@ func EnsureNode(ctx context.Context) (*Proc, error) {
 	pctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(pctx, "node", filepath.Join(dir, "server.mjs"), "--addr", addr)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ())
+	cmd.Env = os.Environ()
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()
 	if err := cmd.Start(); err != nil {

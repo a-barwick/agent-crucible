@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -53,13 +54,20 @@ func TestCollapseAtThirty(t *testing.T) {
 	}
 }
 
+// The demo ensemble is pinned so that a change in the injector, the judge or
+// the sample agent cannot quietly move the numbers on the front page. These
+// values are not meaningful on their own; when a deliberate change moves them,
+// re-pin them and say so in the commit.
 func TestDemoSeed42Locked(t *testing.T) {
 	s := Run(context.Background(), Config{Seed: 42, Trials: 40, P: 0.30, Faults: fault.MVP})
-	if s.Survival != 0.35 {
-		t.Fatalf("demo survival drifted: got %v want 0.35 counts=%v", s.Survival, s.Counts)
+	if s.Survival != 0.30 {
+		t.Fatalf("demo survival drifted: got %v want 0.30 counts=%v", s.Survival, s.Counts)
 	}
-	if s.Counts["completed"] != 4 || s.Counts["recovered"] != 10 {
+	if s.Counts["completed"] != 6 || s.Counts["recovered"] != 6 {
 		t.Fatalf("demo mix drifted: %v", s.Counts)
+	}
+	if s.Errored != 0 {
+		t.Fatalf("the in-process demo should never need infrastructure: %d errored (%s)", s.Errored, s.Error)
 	}
 }
 
@@ -78,6 +86,63 @@ func TestSweepMonotonicSurvival(t *testing.T) {
 		}
 		prev = s.Survival
 	}
+}
+
+// Raising p on a fixed seed must not reshuffle the ensemble. Each decision site
+// draws from its own sub-stream keyed by (site, target, visit), so any site both
+// runs reach sees the same die roll and the same candidate fault; only the
+// verdict on that roll changes, and it changes in one direction.
+//
+// Which faults you *observe* is inevitably path-dependent — a 403 at authorize
+// means the write node never runs, and a site that is never reached cannot
+// fire. So the invariant is asserted where it is exact: on the decisions
+// themselves. With a single shared stream this fails on the first trial where
+// a fault adds a retry, because every later draw shifts by one.
+func TestDecisionsAreStableAsPRises(t *testing.T) {
+	cfg := Config{Seed: 42, Trials: 24, Faults: fault.All}
+	ps := []float64{0, 0.1, 0.2, 0.4, 0.7, 1}
+	runs := make([]map[int]Trial, len(ps))
+	for i, p := range ps {
+		c := cfg
+		c.P = p
+		s := Run(context.Background(), c)
+		runs[i] = map[int]Trial{}
+		for _, tr := range s.Trials {
+			runs[i][tr.N] = tr
+		}
+	}
+	shared := 0
+	for i := 1; i < len(ps); i++ {
+		for n, lo := range runs[i-1] {
+			hi := decisionsByKey(runs[i][n])
+			for key, a := range decisionsByKey(lo) {
+				b, ok := hi[key]
+				if !ok {
+					continue // the higher-p run never reached this site
+				}
+				shared++
+				if a.U != b.U || a.Type != b.Type {
+					t.Fatalf("trial %d site %s: draw changed with p (%v/%s at p=%v vs %v/%s at p=%v)",
+						n, key, a.U, a.Type, ps[i-1], b.U, b.Type, ps[i])
+				}
+				if a.Fired && !b.Fired {
+					t.Fatalf("trial %d site %s: fired at p=%v but not at p=%v (u=%v)",
+						n, key, ps[i-1], ps[i], a.U)
+				}
+			}
+		}
+	}
+	if shared == 0 {
+		t.Fatal("no sites were shared between runs; the test compared nothing")
+	}
+}
+
+func decisionsByKey(tr Trial) map[string]fault.Decision {
+	out := map[string]fault.Decision{}
+	for _, d := range tr.Decisions {
+		out[fmt.Sprintf("%s|%s|%d", d.Site, d.Target, d.Visit)] = d
+	}
+	return out
 }
 
 func TestSingleFaultMalformed(t *testing.T) {

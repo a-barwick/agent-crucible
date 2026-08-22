@@ -42,6 +42,9 @@ func (g *Graph) Run(ctx context.Context, st *State, bus Bus, rec *trace.Recorder
 		if !ok {
 			return Result{Terminal: "abort", Steps: steps}, fmt.Errorf("unknown node %q", node)
 		}
+		// Label the recorder before the hook runs so anything the hook logs is
+		// attributed to the node it is about, not the one that just exited.
+		rec.SetNode(node)
 		if hook != nil {
 			hook.BeforeNode(ctx, node, st, rec)
 		}

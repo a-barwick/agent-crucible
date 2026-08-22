@@ -33,3 +33,22 @@ func Mix(seed int64, parts ...int64) int64 {
 	sum := h.Sum(nil)
 	return int64(binary.LittleEndian.Uint64(sum[:8]))
 }
+
+// Sub returns an independent stream for one named decision site, keyed by
+// the site's label and how many times that site has already been visited.
+//
+// This is what keeps the ensemble stable: a site's draws depend only on its
+// own key and visit count, so a run that takes a different path elsewhere —
+// one extra retry, one skipped node — cannot shift the values every other
+// site sees.
+func Sub(seed int64, key string, n int) *rand.Rand {
+	h := sha256.New()
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], uint64(seed))
+	_, _ = h.Write(b[:])
+	_, _ = h.Write([]byte(key))
+	binary.LittleEndian.PutUint64(b[:], uint64(n))
+	_, _ = h.Write(b[:])
+	sum := h.Sum(nil)
+	return rand.New(rand.NewSource(int64(binary.LittleEndian.Uint64(sum[:8]))))
+}
