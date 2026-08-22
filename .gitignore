@@ -4,3 +4,8 @@
 *.out
 .DS_Store
 dist/
+.venv/
+runtime/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

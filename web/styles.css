@@ -84,6 +84,34 @@ h1 {
 .agent-chip strong { font-size: 1.1rem; }
 .agent-chip span:last-child { color: var(--muted); font-size: 0.9rem; }
 
+.chamber {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.1rem;
+  align-items: center;
+  padding: 0.85rem 2.5rem;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+.chamber label { color: var(--muted); display: flex; gap: 0.4rem; align-items: center; }
+.chamber select, .paste textarea {
+  background: var(--bg-2);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  padding: 0.25rem 0.4rem;
+  font: inherit;
+}
+.chamber select { min-width: 12rem; }
+.pill {
+  border: 1px solid var(--line);
+  padding: 0.2rem 0.45rem;
+  color: var(--muted);
+}
+.paste { padding: 0.85rem 2.5rem 1.1rem; border-bottom: 1px solid var(--line); }
+.paste textarea { width: 100%; min-height: 10rem; font-family: var(--mono); font-size: 0.75rem; }
+.paste-actions { display: flex; gap: 1rem; align-items: center; margin-top: 0.6rem; }
+
 .forge {
   display: grid;
   grid-template-columns: minmax(16rem, 22rem) 1fr auto;

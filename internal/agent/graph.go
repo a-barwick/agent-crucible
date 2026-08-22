@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -12,13 +13,15 @@ import (
 // NodeFunc runs one graph node and returns the next node name.
 type NodeFunc func(ctx context.Context, st *State, bus Bus, rec *trace.Recorder) (next string, err error)
 
-// Graph is a tiny LangGraph stand-in: named nodes, explicit edges, shared state.
+// Graph is a LangGraph-shaped runtime: named nodes, explicit edges, shared
+// state, and a checkpointer. The Python sidecar is the real LangGraph compile.
 type Graph struct {
-	Name     string
-	Start    string
-	Nodes    map[string]NodeFunc
-	MaxSteps int
-	Clock    *clock.Clock
+	Name         string
+	Start        string
+	Nodes        map[string]NodeFunc
+	MaxSteps     int
+	Clock        *clock.Clock
+	Checkpointer Checkpointer
 }
 
 func (g *Graph) Run(ctx context.Context, st *State, bus Bus, rec *trace.Recorder, hook Hook) (Result, error) {
@@ -28,6 +31,9 @@ func (g *Graph) Run(ctx context.Context, st *State, bus Bus, rec *trace.Recorder
 	}
 	node := g.Start
 	steps := 0
+	if g.Checkpointer != nil && st.ThreadID != "" {
+		g.Checkpointer.Put(st.ThreadID, Checkpoint{State: *st, Node: g.Start})
+	}
 	for node != "" && node != "end" && node != "abort" {
 		if err := ctx.Err(); err != nil {
 			return Result{Terminal: "abort", Steps: steps}, err
@@ -52,6 +58,9 @@ func (g *Graph) Run(ctx context.Context, st *State, bus Bus, rec *trace.Recorder
 				Claimed:  claimOf(st),
 				Steps:    steps + 1,
 			}, err
+		}
+		if g.Checkpointer != nil && st.ThreadID != "" {
+			g.Checkpointer.Put(st.ThreadID, Checkpoint{State: *st, Node: node, Step: steps + 1})
 		}
 		rec.NodeExit(node, next)
 		steps++
@@ -83,30 +92,68 @@ func claimOf(st *State) Claim {
 	}
 }
 
-// ParseIntent is a stand-in for a planner LLM: string matching, not a model.
-// The runner stays deterministic; "AI generates scenarios" lives elsewhere.
+// ParseIntent is the fallback parser used by the judge and ScriptedModel.
 func ParseIntent(objective string) Intent {
-	in := Intent{Company: "Acme Corp", DealAction: "close_won", Notify: true}
-	low := objective
-	if containsFold(low, "Acme Supplies") {
-		in.Company = "Acme Supplies"
-	} else if containsFold(low, "Acme") {
-		in.Company = "Acme Corp"
+	return ParseIntentWith(objective, nil)
+}
+
+func ParseIntentWith(objective string, companies []string) Intent {
+	if len(companies) == 0 {
+		companies = []string{"Acme Corp", "Acme Supplies"}
+	}
+	in := Intent{Company: companies[0], DealAction: "close_won", Notify: true}
+	best, bestLen := "", 0
+	for _, c := range companies {
+		if containsFold(objective, c) && len(c) > bestLen {
+			best = c
+			bestLen = len(c)
+		}
+	}
+	if best != "" {
+		in.Company = best
+	} else if containsFold(objective, "Acme") {
+		for _, c := range companies {
+			if c == "Acme Corp" {
+				in.Company = c
+				break
+			}
+		}
 	}
 	switch {
-	case containsFold(low, "On-Hold") || containsFold(low, "on hold") || containsFold(low, "do not close") || containsFold(low, "Stop."):
+	case containsFold(objective, "refund"):
+		in.DealAction = "refund"
+		in.Notify = false
+	case containsFold(objective, "On-Hold") || containsFold(objective, "on hold") || containsFold(objective, "do not close") || containsFold(objective, "Stop."):
 		in.DealAction = "on_hold"
-	case containsFold(low, "Closed-Won") || containsFold(low, "close"):
+	case containsFold(objective, "Closed-Won") || containsFold(objective, "close"):
 		in.DealAction = "close_won"
 	default:
 		in.DealAction = "none"
 	}
-	if containsFold(low, "do not email") || containsFold(low, "do not email anyone") {
+	if containsFold(objective, "do not email") {
 		in.Notify = false
-	} else if containsFold(low, "email") {
+	} else if containsFold(objective, "email") {
 		in.Notify = true
 	}
 	return in
+}
+
+// ParseModelIntent prefers planner JSON; missing notify stays false.
+func ParseModelIntent(text, fallback string, companies []string) Intent {
+	text = strings.TrimSpace(text)
+	if i := strings.Index(text, "{"); i >= 0 {
+		if j := strings.LastIndex(text, "}"); j > i {
+			text = text[i : j+1]
+		}
+	}
+	var in Intent
+	if err := json.Unmarshal([]byte(text), &in); err == nil && (in.Company != "" || in.DealAction != "") {
+		if in.Company == "" {
+			in.Company = ParseIntentWith(fallback, companies).Company
+		}
+		return in
+	}
+	return ParseIntentWith(fallback, companies)
 }
 
 func containsFold(s, sub string) bool {
