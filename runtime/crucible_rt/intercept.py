@@ -328,7 +328,17 @@ def wrap_module(mod, cb, spec: dict | None = None) -> list[str]:
                     wrapped.append(k)
         elif isinstance(obj, list):
             for i, v in enumerate(obj):
-                wrap_tool(v, cb, getattr(v, "name", None))
+                if v is None or getattr(v, "_crucible_wrapped", False):
+                    continue
+                tname = getattr(v, "name", None) or getattr(v, "__name__", None)
+                # Assign the result back. wrap_tool patches a tool object in
+                # place and returns it, but for a plain function it returns a new
+                # wrapper, and dropping that left the list holding the unwrapped
+                # body: an agent exporting `tools = [search, update]` ran
+                # unintercepted.
+                obj[i] = wrap_tool(v, cb, tname)
+                if tname and tname not in wrapped:
+                    wrapped.append(tname)
     return wrapped
 
 

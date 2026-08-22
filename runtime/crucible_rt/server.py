@@ -324,6 +324,7 @@ def main(argv=None):
         print("react-ok", react)
 
         _smoke_wrapper_honesty()
+        _smoke_tools_list()
         _smoke_async_tools()
         _smoke_callback_errors()
         return
@@ -425,6 +426,52 @@ def _smoke_wrapper_honesty() -> None:
         intercept.clear_cb()
         httpio.uninstall()
     print("wrapper-ok", first.calls, second.calls)
+
+
+def _smoke_tools_list() -> None:
+    """An agent may export plain functions in a `tools` list rather than @tool
+    objects. wrap_module patched the tool objects in place but threw away the
+    wrapper it built for a plain function, so the list still held the raw body
+    and those tools ran with no chamber at all."""
+    import types
+
+    from . import httpio, intercept
+
+    calls: list[str] = []
+
+    def search_ticket(query: str) -> dict:
+        """Plain function, no decorator."""
+        return {"id": "tkt-acme"}
+
+    class _Chamber:
+        def before(self, name):
+            calls.append(name)
+            return {}
+
+        def tool(self, name, args):
+            calls.append("tool:" + name)
+            return {"ok": True, "data": {"id": "tkt-acme"}}
+
+        def state(self, message, data=None):
+            return {"ok": True}
+
+    mod = types.ModuleType("smoke_tools_list")
+    mod.tools = [search_ticket]
+    try:
+        names = intercept.wrap_module(mod, _Chamber(), {"tools": [{"name": "search_ticket"}]})
+        entry = mod.tools[0]
+        if not getattr(entry, "_crucible_wrapped", False):
+            raise SystemExit("tools list still holds the unwrapped body")
+        entry("Acme Corp")
+    finally:
+        httpio.clear()
+        intercept.clear_cb()
+        httpio.uninstall()
+    if "search_ticket" not in names:
+        raise SystemExit("wrapped tool not reported: %s" % names)
+    if "search_ticket" not in calls:
+        raise SystemExit("wrapped tool did not reach the chamber: %s" % calls)
+    print("tools-list-ok", names)
 
 
 def _smoke_async_tools() -> None:
