@@ -67,6 +67,9 @@ func (a *Generic) Run(ctx context.Context, st State, bus Bus, rec *trace.Recorde
 	if st.ThreadID == "" {
 		st.ThreadID = "pasted"
 	}
+	if st.Intent.Company == "" && st.Objective != "" {
+		st.Intent = ParseIntentWith(st.Objective, st.Companies)
+	}
 	nodes := map[string]NodeFunc{}
 	for _, name := range a.spec.Graph.Nodes {
 		if name == "end" || name == "abort" {
@@ -76,7 +79,7 @@ func (a *Generic) Run(ctx context.Context, st State, bus Bus, rec *trace.Recorde
 		if bind.Kind == "" {
 			bind = inferBind(name, a.spec)
 		}
-		nodes[name] = a.makeNode(name, bind)
+		nodes[name] = a.remap(name, a.makeNode(name, bind))
 	}
 	start := a.spec.Graph.Start
 	if start == "" {
@@ -114,6 +117,31 @@ func (a *Generic) makeNode(name string, bind NodeBinding) NodeFunc {
 	default:
 		return a.crm.plan
 	}
+}
+
+func (a *Generic) remap(name string, fn NodeFunc) NodeFunc {
+	return func(ctx context.Context, st *State, bus Bus, rec *trace.Recorder) (string, error) {
+		next, err := fn(ctx, st, bus, rec)
+		if err != nil {
+			return next, err
+		}
+		if next == "" || next == "end" || next == "abort" {
+			return next, nil
+		}
+		if a.hasNode(next) {
+			return next, nil
+		}
+		return nextFrom(a.spec.Graph, name), nil
+	}
+}
+
+func (a *Generic) hasNode(name string) bool {
+	for _, n := range a.spec.Graph.Nodes {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Generic) toolNode(name string, bind NodeBinding) NodeFunc {
