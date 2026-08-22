@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Crucible — torture chamber for agents</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="heat" aria-hidden="true"></div>
+  <header class="mast">
+    <div class="brand">
+      <p class="eyebrow">Agent Crucible</p>
+      <h1>Torture chamber</h1>
+      <p class="lede">Give it a graph and its tool schemas. It runs the same task until the architecture cracks. The runner is deterministic. The model is not invited.</p>
+    </div>
+    <div class="agent-chip" id="agent-chip">
+      <span class="fw">langgraph</span>
+      <strong id="agent-name">aether-closer</strong>
+      <span id="agent-task">Close Acme · email the AE</span>
+    </div>
+  </header>
+
+  <section class="forge" aria-label="Failure probability">
+    <div class="forge-copy">
+      <label for="p-slider">Tool failure probability</label>
+      <p>Same seed. Same forty trials. The only thing that changes is how often a tool lies, stalls, or repeats itself.</p>
+    </div>
+    <div class="forge-control">
+      <input id="p-slider" type="range" min="0" max="30" step="1" value="0" />
+      <div class="forge-readout">
+        <span id="p-value">0%</span>
+        <span class="hint" id="p-hint">cold</span>
+      </div>
+    </div>
+    <div class="forge-meta">
+      <label>seed <input id="seed" type="number" value="42" /></label>
+      <label>trials <input id="trials" type="number" value="40" min="8" max="200" /></label>
+      <button type="button" id="resweep">Recast</button>
+    </div>
+  </section>
+
+  <section class="faults" aria-label="Fault types">
+    <p class="section-kicker">Inject</p>
+    <div class="fault-row" id="fault-row"></div>
+  </section>
+
+  <section class="board">
+    <article class="hero-stat">
+      <p class="section-kicker">Survival</p>
+      <p class="giant" id="survival">—</p>
+      <p class="sub" id="survival-sub">waiting for the first pour</p>
+      <ol class="counts" id="counts"></ol>
+      <div class="curve" id="curve" aria-hidden="true"></div>
+    <article class="tiles-wrap">
+      <p class="section-kicker">Ensemble <span id="tile-caption">trial 0–39</span></p>
+      <div class="tiles" id="tiles" role="list"></div>
+    </article>
+  </section>
+
+  <section class="lower">
+    <article class="timeline-panel">
+      <header>
+        <p class="section-kicker">Trace</p>
+        <h2 id="tl-title">Select a trial</h2>
+        <p class="sub" id="tl-reason"></p>
+      </header>
+      <ol class="graph" id="graph"></ol>
+      <ol class="timeline" id="timeline"></ol>
+    </article>
+    <article class="side">
+      <div>
+        <p class="section-kicker">Clusters</p>
+        <ul class="clusters" id="clusters"></ul>
+      </div>
+      <blockquote class="critique" id="critique">
+        <p class="headline" id="headline">Drag the slider from 0% to 30%. Watch a production-shaped closer collapse.</p>
+        <div id="paragraphs"></div>
+        <ul class="fixes" id="fixes"></ul>
+      </blockquote>
+    </article>
+  </section>
+
+  <footer>
+    <p>Seeded replay · <code id="replay-cmd">crucible replay -seed 42 -trial 0 -p 0</code></p>
+  </footer>
+  <script src="/app.js"></script>
+</body>
+</html>
