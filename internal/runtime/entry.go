@@ -37,6 +37,7 @@ func ResolveEntry(entry string) (string, error) {
 		return "", fmt.Errorf("entry contains control characters")
 	}
 	roots := entryRoots()
+	outside := ""
 	for _, c := range candidates(entry) {
 		if !fileExists(c) {
 			continue
@@ -52,6 +53,9 @@ func ResolveEntry(entry string) (string, error) {
 			real = abs
 		}
 		if !underAny(real, roots) {
+			if outside == "" {
+				outside = abs
+			}
 			continue
 		}
 		return abs, nil
@@ -65,6 +69,13 @@ func ResolveEntry(entry string) (string, error) {
 				return c, nil
 			}
 		}
+	}
+	// "Not found" and "found somewhere I will not import from" are different
+	// problems, and an operator who really does keep agent files elsewhere needs
+	// to be told which one they have.
+	if outside != "" {
+		return "", fmt.Errorf("entry %q resolves to %s, outside the roots the runtime imports from (%s); add its directory to %s or set %s",
+			entry, outside, strings.Join(roots, string(filepath.ListSeparator)), "CRUCIBLE_ENTRY_ROOTS", AllowAnyEntryEnv)
 	}
 	return "", fmt.Errorf("entry %q not found under the working tree, the repo root, or examples/", entry)
 }
@@ -103,6 +114,7 @@ func candidates(entry string) []string {
 // and the repo checkout. Both are places the operator already controls.
 func entryRoots() []string {
 	var roots []string
+	seen := map[string]bool{}
 	add := func(p string) {
 		if p == "" {
 			return
@@ -111,6 +123,10 @@ func entryRoots() []string {
 			if real, err := filepath.EvalSymlinks(abs); err == nil {
 				abs = real
 			}
+			if seen[abs] {
+				return
+			}
+			seen[abs] = true
 			roots = append(roots, abs)
 		}
 	}
