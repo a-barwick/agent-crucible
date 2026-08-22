@@ -29,14 +29,14 @@ const (
 )
 
 type Config struct {
-	Seed       int64            `json:"seed"`
-	Trials     int              `json:"trials"`
-	P          float64          `json:"p"`
-	Faults     []fault.Type     `json:"faults"`
-	Scenario   string           `json:"scenario,omitempty"`
-	Agent      string           `json:"agent,omitempty"`
-	Spec       *agent.Spec      `json:"spec,omitempty"`
-	Bundle     *scenario.Bundle `json:"bundle,omitempty"`
+	Seed       int64               `json:"seed"`
+	Trials     int                 `json:"trials"`
+	P          float64             `json:"p"`
+	Faults     []fault.Type        `json:"faults"`
+	Scenario   string              `json:"scenario,omitempty"`
+	Agent      string              `json:"agent,omitempty"`
+	Spec       *agent.Spec         `json:"spec,omitempty"`
+	Bundle     *scenario.Bundle    `json:"bundle,omitempty"`
 	RuntimeURL string              `json:"runtime_url,omitempty"`
 	AI         ai.Config           `json:"ai,omitempty"`
 	Extra      []scenario.Scenario `json:"extra_scenarios,omitempty"`
@@ -50,13 +50,21 @@ func (c Config) withDefaults() Config {
 		c.Trials = 400
 	}
 	if len(c.Faults) == 0 {
-		c.Faults = append([]fault.Type(nil), fault.MVP...)
+		if agent.DropIn(c.Agent) {
+			c.Faults = append([]fault.Type(nil), fault.All...)
+		} else {
+			c.Faults = append([]fault.Type(nil), fault.MVP...)
+		}
 	}
 	if c.Agent == "" {
 		c.Agent = agent.IDCloser
 	}
 	if c.Scenario == "" {
-		c.Scenario = scenario.CloseAcmeID
+		if agent.DropIn(c.Agent) {
+			c.Scenario = scenario.TicketID
+		} else {
+			c.Scenario = scenario.CloseAcmeID
+		}
 	}
 	if c.P < 0 {
 		c.P = 0
@@ -157,6 +165,8 @@ func Run(ctx context.Context, cfg Config) Suite {
 		ByFault:  byFault,
 		ByShape:  shapes,
 		Samples:  samples,
+		Tools:    toolNames(cfg),
+		Agent:    cfg.Agent,
 		Client:   ai.FromEnv(cfg.AI),
 	})
 
@@ -294,11 +304,7 @@ func (h *nodeHook) BeforeNode(_ context.Context, name string, st *agent.State, r
 	if name == "plan" {
 		if d := h.inj.Decide(fault.SiteNode, name, fault.PartialModel); d.Fired && d.Type == fault.PartialModel {
 			st.Partial = true
-			obj := "Update the Acme Corp deal to Closed-Won."
-			if len(st.Companies) > 0 {
-				obj = "Update the " + st.Companies[0] + " deal to Closed-Won."
-			}
-			st.Objective = obj
+			st.Objective = agent.TruncateObjective(st.Objective)
 			rec.Fault(fault.PartialModel, "plan", "planner emitted a truncated objective (no email)")
 		}
 	}
@@ -310,7 +316,7 @@ func (h *nodeHook) BeforeNode(_ context.Context, name string, st *agent.State, r
 			}
 			st.Objective = obj
 			rec.Objective(obj)
-			rec.Fault(fault.ObjectiveChange, name, "user cancelled the close after "+name+" was already scheduled")
+			rec.Fault(fault.ObjectiveChange, name, "user cancelled the objective after "+name+" was already scheduled")
 		}
 	}
 }
@@ -324,6 +330,9 @@ func resolveScenario(cfg Config) scenario.Scenario {
 			}
 			return b
 		}
+	}
+	if agent.DropIn(cfg.Agent) && (cfg.Scenario == "" || cfg.Scenario == scenario.CloseAcmeID) {
+		return scenario.Ticket()
 	}
 	if s, ok := scenario.Lookup(cfg.Scenario); ok {
 		return s
@@ -339,7 +348,7 @@ func resolveScenario(cfg Config) scenario.Scenario {
 func specOf(cfg Config) *agent.Spec {
 	if cfg.Bundle != nil {
 		s := cfg.Bundle.Spec
-		if s.Name != "" || len(s.Tools) > 0 || len(s.Graph.Nodes) > 0 {
+		if s.Name != "" || len(s.Tools) > 0 || len(s.Graph.Nodes) > 0 || s.Entry != "" || s.Endpoint != "" {
 			return &s
 		}
 	}
@@ -373,16 +382,19 @@ func resolveExpect(scn scenario.Scenario) judge.Expect {
 
 func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent.Checkpointer) (agent.Agent, error) {
 	name := cfg.Agent
-	spec := cfg.Spec
-	if cfg.Bundle != nil {
-		s := cfg.Bundle.Spec
-		if s.Name != "" || len(s.Tools) > 0 {
-			spec = &s
-		}
-		if name == "" || name == agent.IDPasted {
-			name = agent.IDPasted
-		}
+	if cfg.Bundle != nil && (name == "" || name == agent.IDPasted) {
+		name = agent.IDPasted
 	}
+	spec := hydrateSpec(cfg)
+
+	if spec != nil && spec.Endpoint != "" {
+		kind := spec.Runtime
+		if kind == "" {
+			kind = "langgraph"
+		}
+		return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: kind, URL: spec.Endpoint, Spec: spec})
+	}
+
 	switch name {
 	case "", agent.IDCloser:
 		c := agent.NewCRM(clk)
@@ -391,9 +403,9 @@ func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent
 		return c, nil
 	case agent.IDPasted:
 		if spec == nil {
-			return nil, fmt.Errorf("pasted agent needs tool schemas and a graph")
+			return nil, fmt.Errorf("pasted agent needs an entry file, an endpoint, or tool schemas")
 		}
-		if spec.Runtime == "langgraph" || spec.Runtime == "adk" {
+		if spec.Entry != "" || spec.Runtime == "langgraph" || spec.Runtime == "adk" {
 			return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: spec.Runtime, URL: cfg.RuntimeURL, Spec: spec})
 		}
 		ag := agent.NewFromSpec(*spec, clk)
@@ -402,13 +414,104 @@ func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent
 			g.Model = agent.ScriptedModel{}
 		}
 		return ag, nil
-	case agent.IDCloserLangGraph:
+	case agent.IDCloserLangGraph, agent.IDTicketLangGraph:
 		return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: "langgraph", URL: cfg.RuntimeURL, Spec: spec})
-	case agent.IDCloserADK:
+	case agent.IDCloserADK, agent.IDTicketADK:
 		return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: "adk", URL: cfg.RuntimeURL, Spec: spec})
+	case agent.IDRemote:
+		url := cfg.RuntimeURL
+		if spec != nil && spec.Endpoint != "" {
+			url = spec.Endpoint
+		}
+		if url == "" {
+			return nil, fmt.Errorf("remote agent needs spec.endpoint or -endpoint")
+		}
+		kind := "langgraph"
+		if spec != nil && spec.Runtime != "" {
+			kind = spec.Runtime
+		}
+		return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: kind, URL: url, Spec: spec})
 	default:
-		return nil, fmt.Errorf("unknown agent %q — paste a spec or pick aether-closer / aether-closer-langgraph / aether-closer-adk", name)
+		if spec != nil && (spec.Entry != "" || spec.Endpoint != "") {
+			kind := spec.Runtime
+			if kind == "" {
+				kind = "langgraph"
+			}
+			return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: kind, URL: cfg.RuntimeURL, Spec: spec})
+		}
+		return nil, fmt.Errorf("unknown agent %q — drop in an entry/endpoint, paste a spec, or pick a catalog id", name)
 	}
+}
+
+func hydrateSpec(cfg Config) *agent.Spec {
+	spec := specOf(cfg)
+	switch cfg.Agent {
+	case agent.IDTicketLangGraph:
+		spec = overlaySpec(agent.TicketLangGraphSpec(), spec)
+	case agent.IDTicketADK:
+		spec = overlaySpec(agent.TicketADKSpec(), spec)
+	}
+	if spec != nil && spec.Entry != "" {
+		cp := *spec
+		cp.Entry = runtime.FindEntry(spec.Entry)
+		spec = &cp
+	}
+	return spec
+}
+
+func overlaySpec(base agent.Spec, over *agent.Spec) *agent.Spec {
+	if over == nil {
+		return &base
+	}
+	out := base
+	if over.Name != "" {
+		out.Name = over.Name
+	}
+	if over.Runtime != "" {
+		out.Runtime = over.Runtime
+	}
+	if over.Entry != "" {
+		out.Entry = over.Entry
+	}
+	if over.Export != "" {
+		out.Export = over.Export
+	}
+	if over.Endpoint != "" {
+		out.Endpoint = over.Endpoint
+	}
+	if len(over.Tools) > 0 {
+		out.Tools = over.Tools
+	}
+	if len(over.Graph.Nodes) > 0 {
+		out.Graph = over.Graph
+	}
+	if len(over.Companies) > 0 {
+		out.Companies = over.Companies
+	}
+	if over.Objective != "" {
+		out.Objective = over.Objective
+	}
+	return &out
+}
+
+func toolNames(cfg Config) []string {
+	spec := hydrateSpec(cfg)
+	if spec == nil || len(spec.Tools) == 0 {
+		if agent.DropIn(cfg.Agent) {
+			spec = overlaySpec(agent.TicketLangGraphSpec(), nil)
+		} else {
+			var out []string
+			for _, t := range agent.CRMTools() {
+				out = append(out, t.Name)
+			}
+			return out
+		}
+	}
+	out := make([]string, 0, len(spec.Tools))
+	for _, t := range spec.Tools {
+		out = append(out, t.Name)
+	}
+	return out
 }
 
 func ratio(n, d int) float64 {

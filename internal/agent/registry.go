@@ -6,6 +6,9 @@ const (
 	IDCloserLangGraph = "aether-closer-langgraph"
 	IDCloserADK       = "aether-closer-adk"
 	IDPasted          = "pasted"
+	IDTicketLangGraph = "ticket-langgraph"
+	IDTicketADK       = "ticket-adk"
+	IDRemote          = "remote"
 )
 
 // Info is what the UI lists without constructing a graph.
@@ -39,17 +42,51 @@ func Catalog(runtimeReady bool) []Info {
 		{
 			ID: IDPasted, Name: "pasted", Framework: "generic",
 			Runtime: "spec", Available: true,
-			Description: "You give it tool schemas and a graph. The chamber stays on this side of the tools.",
+			Description: "Paste tool schemas and an optional graph. Chamber-built walk if you have no file.",
+		},
+		{
+			ID: IDTicketLangGraph, Name: "ticket-bot", Framework: "langgraph",
+			Runtime: "python", Available: runtimeReady,
+			Description: "A real user-written LangGraph (examples/ticket_graph.py). Tools callback into the chamber.",
+		},
+		{
+			ID: IDTicketADK, Name: "ticket-bot", Framework: "adk",
+			Runtime: "python", Available: runtimeReady,
+			Description: "A real user-written ADK agent (examples/ticket_adk.py). Same ticket task, ADK loop.",
+		},
+		{
+			ID: IDRemote, Name: "remote", Framework: "http",
+			Runtime: "endpoint", Available: true,
+			Description: "Any process that speaks POST /v1/run and callbacks for tools. Set spec.endpoint.",
 		},
 	}
 }
 
 func NeedsPython(id string, spec *Spec) bool {
+	if spec != nil && spec.Endpoint != "" {
+		return false
+	}
 	if spec != nil {
+		if spec.Entry != "" {
+			return true
+		}
 		switch spec.Runtime {
 		case "langgraph", "adk":
 			return true
 		}
 	}
-	return id == IDCloserLangGraph || id == IDCloserADK
+	switch id {
+	case IDCloserLangGraph, IDCloserADK, IDTicketLangGraph, IDTicketADK:
+		return true
+	}
+	return false
+}
+
+// DropIn reports whether this id is a real agent file or process, not a chamber walk.
+func DropIn(id string) bool {
+	switch id {
+	case IDTicketLangGraph, IDTicketADK, IDRemote:
+		return true
+	}
+	return false
 }

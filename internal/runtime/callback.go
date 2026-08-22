@@ -38,6 +38,7 @@ func NewCallback() (*Callback, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /tool", c.handleTool)
 	mux.HandleFunc("POST /before_node", c.handleBefore)
+	mux.HandleFunc("POST /state", c.handleState)
 	c.srv = &http.Server{Handler: mux}
 	go func() { _ = c.srv.Serve(ln) }()
 	return c, nil
@@ -103,6 +104,9 @@ func (c *Callback) handleBefore(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
+	if s.Rec != nil && req.Name != "" {
+		s.Rec.NodeEnter(req.Name)
+	}
 	if s.Hook != nil {
 		s.Hook.BeforeNode(s.Ctx, req.Name, s.St, s.Rec)
 	}
@@ -113,6 +117,23 @@ func (c *Callback) handleBefore(w http.ResponseWriter, r *http.Request) {
 		Junk:      s.St.Junk,
 		Intent:    s.St.Intent,
 	})
+}
+
+func (c *Callback) handleState(w http.ResponseWriter, r *http.Request) {
+	s := c.session(r)
+	if s == nil {
+		http.Error(w, "unknown session", http.StatusUnauthorized)
+		return
+	}
+	var req StateReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if req.Message != "" && s.Rec != nil {
+		s.Rec.State(req.Message, req.Data)
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

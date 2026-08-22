@@ -10,6 +10,7 @@ import (
 	"github.com/a-barwick/agent-crucible/internal/critique"
 	"github.com/a-barwick/agent-crucible/internal/fault"
 	"github.com/a-barwick/agent-crucible/internal/judge"
+	"github.com/a-barwick/agent-crucible/internal/schema"
 )
 
 // Evidence is one trial the explainer can read. Paragraphs come from
@@ -30,6 +31,8 @@ type ExplainInput struct {
 	ByFault  []cluster.Cluster
 	ByShape  []cluster.Cluster
 	Samples  []Evidence
+	Tools    []string
+	Agent    string
 	Client   Client
 }
 
@@ -261,8 +264,8 @@ func pickHeadline(in ExplainInput, fallback string) string {
 	}
 	if worst.Fault == fault.Malformed && faults <= 2 {
 		return fmt.Sprintf(
-			"The agent completed %s of clean runs but only %s when the CRM tool returned a successful response with missing fields. The graph treats semantic failure as transport success. Add validation before the write node.",
-			pct(in.Clean), pct(worst.Rate),
+			"The agent completed %s of clean runs but only %s when %s returned a successful response with missing fields. The graph treats semantic failure as transport success. Add validation before the write node.",
+			pct(in.Clean), pct(worst.Rate), writeToolPhrase(in),
 		)
 	}
 	if worst.Fault != "" {
@@ -272,6 +275,15 @@ func pickHeadline(in ExplainInput, fallback string) string {
 		)
 	}
 	return fallback
+}
+
+func writeToolPhrase(in ExplainInput) string {
+	for _, t := range in.Tools {
+		if schema.IsWriteLike(t) && t != "write_deal" {
+			return t
+		}
+	}
+	return "the CRM tool"
 }
 
 func pct(f float64) string {

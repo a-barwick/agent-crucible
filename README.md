@@ -13,11 +13,14 @@ The AI is not the test runner. The runner is deterministic — seeded, replayabl
 | Agent id | Runtime | What it actually is |
 | --- | --- | --- |
 | `aether-closer` | in-process Go | Fast slider twin: nodes, `MemorySaver`, invoked planner |
-| `aether-closer-langgraph` | Python | Real `langgraph.StateGraph` compiled with `InMemorySaver`. Plan calls a LangChain chat model |
-| `aether-closer-adk` | Python | ADK adapter: `Agent` + `Runner` + `SessionService`. Tools callback into the chamber |
-| `pasted` | spec | Paste tool schemas + a graph JSON. Optional fixtures and expect |
+| `aether-closer-langgraph` | Python | Sample closer as a real `langgraph.StateGraph` + `InMemorySaver` |
+| `aether-closer-adk` | Python | Sample closer as ADK `Agent` + `Runner` + `SessionService` |
+| `ticket-langgraph` | Python | **A user-written graph**: `examples/ticket_graph.py`. The sidecar imports it. |
+| `ticket-adk` | Python | **A user-written ADK agent**: `examples/ticket_adk.py` |
+| `remote` | HTTP | Any process that speaks `POST /v1/run` and callbacks for tools |
+| `pasted` | spec / entry | Paste schemas, or set `spec.entry` / `spec.endpoint` |
 
-The chamber stays on this side of the tools. Sidecars never touch the world; they HTTP-callback into `FaultBus`.
+The chamber stays on this side of the tools. Drop-in files and processes never touch the world; they HTTP-callback into `FaultBus`.
 
 ## Scenario library
 
@@ -28,6 +31,7 @@ Not one Acme close. Built-in tasks:
 - `renew-supplies` — other company, lookalike ballast
 - `refund-acme` — write Refunded, stay quiet
 - `close-quiet` — Closed-Won, do not email
+- `resolve-ticket` — search then update a ticket (drop-in agents default here)
 
 `crucible generate` (and the UI button) adds more from the tool schemas. With `OPENAI_API_KEY` / `CRUCIBLE_AI_API_KEY` a model writes extras; without it the local evaluator still produces the library.
 
@@ -38,15 +42,25 @@ python3 -m pip install -r runtime/requirements.txt   # LangGraph sidecar
 go run ./cmd/crucible serve -addr :8080
 ```
 
-Open http://localhost:8080. Drag *tool failure probability* from 0% to 30%. Switch agent to `aether-closer-langgraph` or paste a spec. The ensemble is fixed: raising `p` only adds faults.
+Open http://localhost:8080. Drag *tool failure probability* from 0% to 30%. Load *ticket LangGraph* (a real file, not a compiled walk) or paste a spec. The ensemble is fixed: raising `p` only adds faults.
 
 ```bash
 crucible run -seed 42 -trials 40 -p 0.3
+crucible run -agent ticket-langgraph -p 0.3 -faults all
+crucible run -entry examples/ticket_graph.py -spec examples/ticket.json
+crucible run -agent remote -endpoint http://127.0.0.1:8092 -spec examples/ticket.json
 crucible run -agent aether-closer-langgraph -scenario refund-acme -p 0.2
 crucible replay -seed 42 -trial 7 -p 0.3
 crucible agents
 crucible scenarios
 crucible generate -n 5
+```
+
+An arbitrary process:
+
+```bash
+python3 examples/http_agent.py --addr 127.0.0.1:8092
+crucible run -agent remote -endpoint http://127.0.0.1:8092 -spec examples/ticket.json
 ```
 
 ## Faults
@@ -57,7 +71,7 @@ crucible generate -n 5
 | `malformed` | 200-shaped payload, required fields gone | Validate before the next node |
 | `duplicate` | Same side effect delivered twice | Idempotency keys |
 | `stale_memory` | Last week's deal overwrites a fresh fetch | Invalidate memory on fetch |
-| `permission` | `write_deal` returns 403 | Hard-stop; never email a close |
+| `permission` | The write tool returns 403 | Hard-stop; never continue as if the write landed |
 | `partial_model` | Planner drops the email clause | Schema-check planner JSON |
 | `context_pressure` | Ballast hijacks lookup to a lookalike company | Pin the objective |
 | `cost_ceiling` | Budget trips at the midpoint | Abort and roll back claims |
@@ -69,7 +83,7 @@ The sample agent does none of those things on purpose. It is the patient.
 
 ```
 seed + trial  →  rng stream  →  fault decisions (u < p)
-                              →  agent (Go | LangGraph | ADK | pasted spec)
+                              →  agent (Go | LangGraph | ADK | entry file | HTTP process)
                               →  tool callback → instrumented world
                               →  rule judge (+ model if ambiguous)
                               →  clusters + evidence-based critique
@@ -88,19 +102,21 @@ Ambiguous traces (claimed success, world unfinished, no unsafe mutation) go to t
 
 ## Bring your own agent
 
-1. **Paste** a JSON bundle in the UI (`spec.tools`, optional `spec.graph` / `node_tools`, `scenario.fixtures`, `scenario.expect`).
-2. **Switch the agent** to `aether-closer-langgraph` or `aether-closer-adk` to compile that spec on the sidecar. The in-process `pasted` agent stays the fast Go twin. Set `spec.runtime` to `langgraph` / `adk` to force the sidecar from `pasted`.
-3. **Generate scenarios** from the pasted tools. Drafts carry `expect` + `fixtures` and actually run — they are not silent aliases for close-acme.
-4. **Implement** `agent.Agent` in-process, or **speak the protocol**: `POST /v1/run` with `{callback, token, objective, thread_id, spec}`. Call `POST {callback}/tool` and `POST {callback}/before_node`.
+1. **Drop a file.** `spec.entry` (or `-entry`) is a Python module that exports `run(cb, req)`, `build(cb)`, or `graph`. The sidecar imports *your* graph. See `examples/ticket_graph.py` and `examples/ticket_adk.py`.
+2. **Drop a process.** `spec.endpoint` (or `-endpoint` / agent `remote`) is any HTTP server that speaks `POST /v1/run` and callbacks for tools. See `examples/http_agent.py`.
+3. **Paste schemas** when you do not have a file yet (`spec.tools`, optional `spec.graph`). The chamber will compile a walk. That is a fallback, not “give it an agent.”
+4. **Generate scenarios** from the tools. Drafts carry `expect` + `fixtures` and actually run.
 
-The world is not CRM-only. Tool names in the spec are classified (`search_*` reads, `update_*` writes, `send_*` / `notify_*` emails, `*permission*` checks) and served from `fixtures.records`. Known CRM names still hit the sample tables. The judge scores `expect` — `record_id` / `status` / `writes` / `emails` / `record_fields` — not hardcoded Acme ids. Unknown scenario ids look in `extra_scenarios` / the bundle before falling back to the library.
+A drop-in file receives `cb`. Call `cb.retry_tool(name, args)`, `cb.before(node)`, and optionally `cb.state(message, data)` so the critique can read evidence. Do not import the world.
 
-Tools without a graph become a linear walk after `plan`. CRM tool names without a custom graph still compile the sample closer. Anything else is compiled from the spec on Go, LangGraph, or ADK.
+The judge scores `expect` — `record_id` / `status` / `writes` / `emails` / `record_fields` — not hardcoded Acme ids. The full fault catalog (all nine) runs against the same task. Critique copy names the write tool that actually failed (`update_ticket`, not “the CRM tool”) when the spec is not the sample closer.
 
 ```json
 {
   "spec": {
     "name": "ticket-bot",
+    "runtime": "langgraph",
+    "entry": "examples/ticket_graph.py",
     "tools": [
       {"name": "search_ticket", "required": ["query"]},
       {"name": "update_ticket", "required": ["id", "status"]}
@@ -126,15 +142,16 @@ Set `CRUCIBLE_RUNTIME` if the `runtime/` tree is not next to the binary. Planner
 cmd/crucible/          CLI + HTTP entry
 internal/harness/      seeded suite + sweep runner
 internal/fault/        injection, independent of p
-internal/agent/        interfaces, MemorySaver, planner, CRM + generic
-internal/runtime/      Python sidecar client + localhost tool callback
-internal/scenario/     task library
+internal/agent/        interfaces, MemorySaver, planner, CRM + generic + ticket spec
+internal/runtime/      Python sidecar client, entry resolver, localhost tool callback
+internal/scenario/     task library including resolve-ticket
 internal/ai/           generate / evaluate / explain
 internal/world/        CRM tables + generic records; Invoke from spec
 internal/judge/        expect-driven recovery rules
 internal/cluster/      failure fingerprints
 internal/critique/     critique types
 internal/server/       /api/meta /api/run /api/sweep /api/replay /api/generate
-runtime/crucible_rt/   LangGraph StateGraph + ADK adapter + generic spec compiler
+runtime/crucible_rt/   sidecar + loader for user entry files
+examples/              drop-in LangGraph, ADK, and HTTP process agents
 web/                   timeline UI
 ```

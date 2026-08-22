@@ -46,6 +46,14 @@ func handleMeta(w http.ResponseWriter, _ *http.Request) {
 		"faults":    fault.Catalog(),
 		"runtime":   rt,
 		"ai":        ai.StatusFromEnv(),
+		"presets": map[string]any{
+			agent.IDTicketLangGraph: map[string]any{
+				"spec": agent.TicketLangGraphSpec(), "scenario": scenario.Ticket(),
+			},
+			agent.IDTicketADK: map[string]any{
+				"spec": agent.TicketADKSpec(), "scenario": scenario.Ticket(),
+			},
+		},
 		"defaults": map[string]any{
 			"seed": 42, "trials": 40, "p": 0, "p_max": 0.30, "step": 0.01,
 			"faults":    fault.MVP,
@@ -57,16 +65,16 @@ func handleMeta(w http.ResponseWriter, _ *http.Request) {
 }
 
 type runReq struct {
-	Seed       int64            `json:"seed"`
-	Trials     int              `json:"trials"`
-	P          float64          `json:"p"`
-	Faults     []fault.Type     `json:"faults"`
-	MaxP       float64          `json:"max_p"`
-	Step       float64          `json:"step"`
-	Trial      int              `json:"trial"`
-	Agent      string           `json:"agent"`
-	Scenario   string           `json:"scenario"`
-	Spec       *agent.Spec      `json:"spec"`
+	Seed       int64               `json:"seed"`
+	Trials     int                 `json:"trials"`
+	P          float64             `json:"p"`
+	Faults     []fault.Type        `json:"faults"`
+	MaxP       float64             `json:"max_p"`
+	Step       float64             `json:"step"`
+	Trial      int                 `json:"trial"`
+	Agent      string              `json:"agent"`
+	Scenario   string              `json:"scenario"`
+	Spec       *agent.Spec         `json:"spec"`
 	Bundle     *scenario.Bundle    `json:"bundle"`
 	RuntimeURL string              `json:"runtime_url"`
 	Extra      []scenario.Scenario `json:"extra_scenarios,omitempty"`

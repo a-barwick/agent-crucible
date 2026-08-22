@@ -78,7 +78,7 @@ func (m HTTPModel) Complete(ctx context.Context, req ModelReq) (ModelResp, error
 	body := map[string]any{
 		"model": m.Model,
 		"messages": []map[string]string{
-			{"role": "system", "content": "Return only JSON {company, deal_action, notify}. deal_action is close_won, on_hold, refund, or none."},
+			{"role": "system", "content": "Return only JSON {company, deal_action, notify}. deal_action is close_won, on_hold, refund, resolve, or none."},
 			{"role": "user", "content": req.Objective},
 		},
 		"temperature": 0,

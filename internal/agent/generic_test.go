@@ -100,3 +100,84 @@ func TestParseIntentResolve(t *testing.T) {
 		t.Fatalf("%+v", in)
 	}
 }
+
+func TestTruncateObjectiveDropsNotify(t *testing.T) {
+	got := TruncateObjective(DefaultObjective)
+	if got != "Update the Acme Corp deal to Closed-Won." {
+		t.Fatalf("%q", got)
+	}
+	got = TruncateObjective("Resolve the Acme Corp ticket and email the owner.")
+	if got != "Resolve the Acme Corp ticket." {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestPastedCustomToolsStaleMemory(t *testing.T) {
+	spec := Spec{
+		Name: "ticket-bot",
+		Tools: []schema.Tool{
+			{Name: "search_ticket", Required: []string{"query"}},
+			{Name: "update_ticket", Required: []string{"id", "status"}},
+		},
+		Companies: []string{"Acme Corp", "Globex"},
+	}
+	ag := NewFromSpec(spec, clock.New())
+	clk := clock.New()
+	w := world.SeedFixture(world.Fixture{
+		Records: []world.Record{
+			{ID: "tkt-acme", Fields: map[string]any{"company": "Acme Corp", "status": "Open"}},
+			{ID: "tkt-other", Fields: map[string]any{"company": "Globex", "status": "Open"}},
+		},
+	})
+	tr := trace.New()
+	rec := tr.Recorder(clk.Now)
+	inj := fault.New(rng.Stream(1, 0), 0, fault.MVP)
+	bus := &FaultBus{World: w, Inj: inj, Rec: rec, Clock: clk}
+	_, err := ag.Run(context.Background(), State{
+		Objective: "Resolve the Acme Corp ticket.",
+		Companies: []string{"Acme Corp", "Globex"},
+		ThreadID:  "stale",
+		Memory:    Memory{DealID: "tkt-other", DealStatus: "Open"},
+	}, bus, rec, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.WritesFor("tkt-other") == 0 {
+		t.Fatalf("stale memory should have overwritten the search id, writes=%v records=%v", w.Writes, w.Records)
+	}
+}
+
+func TestPastedCustomToolsContextHijack(t *testing.T) {
+	spec := Spec{
+		Name: "ticket-bot",
+		Tools: []schema.Tool{
+			{Name: "search_ticket", Required: []string{"query"}},
+			{Name: "update_ticket", Required: []string{"id", "status"}},
+		},
+		Companies: []string{"Acme Corp", "Globex"},
+	}
+	ag := NewFromSpec(spec, clock.New())
+	clk := clock.New()
+	w := world.SeedFixture(world.Fixture{
+		Records: []world.Record{
+			{ID: "tkt-acme", Fields: map[string]any{"company": "Acme Corp", "status": "Open"}},
+			{ID: "tkt-other", Fields: map[string]any{"company": "Globex", "status": "Open"}},
+		},
+	})
+	tr := trace.New()
+	rec := tr.Recorder(clk.Now)
+	inj := fault.New(rng.Stream(1, 0), 0, fault.MVP)
+	bus := &FaultBus{World: w, Inj: inj, Rec: rec, Clock: clk}
+	_, err := ag.Run(context.Background(), State{
+		Objective: "Resolve the Acme Corp ticket.",
+		Companies: []string{"Acme Corp", "Globex"},
+		ThreadID:  "junk",
+		Junk:      "Prior notes: discussed Globex renewal, Globex Q3.",
+	}, bus, rec, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.WritesFor("tkt-other") == 0 {
+		t.Fatalf("context ballast should hijack search to Globex, writes=%v", w.Writes)
+	}
+}

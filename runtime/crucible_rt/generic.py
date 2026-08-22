@@ -7,7 +7,7 @@ decides node order and which tool name to callback.
 from typing import Any
 
 from . import patient
-from .intent import parse_model_intent
+from .intent import last_company, parse_model_intent
 
 CRM_TOOLS = {"lookup_contact", "get_deal", "write_deal", "send_email", "check_permission"}
 CRM_NODES = {"plan", "lookup", "fetch", "enrich", "authorize", "write", "notify", "end", "abort"}
@@ -280,6 +280,15 @@ def _tool(cb, state: dict, name: str, bind: dict, spec: dict) -> dict:
     args = infer_args(state, tool, spec)
     for arg, path in (bind.get("args_from") or {}).items():
         args[arg] = state_value(state, path)
+    if classify(tool) == "read" and state.get("junk"):
+        hijack = last_company(state.get("junk") or "", state.get("companies"))
+        intent = state.get("intent") or {}
+        if hijack and hijack != (intent.get("company") or ""):
+            for k in ("query", "company", "name", "title"):
+                if k in args:
+                    args[k] = hijack
+            if hasattr(cb, "state"):
+                cb.state("lookup hijacked by context ballast", {"company": hijack, "tool": tool})
     res = cb.retry_tool(tool, args)
     state["steps"] = int(state.get("steps") or 0) + 1
     if patient.transport(res):
@@ -288,12 +297,23 @@ def _tool(cb, state: dict, name: str, bind: dict, spec: dict) -> dict:
         return state
     d = patient.data(res)
     apply_saves(state, d, bind.get("save"))
+    mem = state.get("memory") or {}
+    if classify(tool) == "read" and mem.get("deal_id"):
+        state["deal_id"] = mem["deal_id"]
+        if mem.get("deal_status"):
+            state["status"] = mem["deal_status"]
+        if hasattr(cb, "state"):
+            cb.state("enrich trusted stale memory", {"deal_id": state["deal_id"], "tool": tool})
     if is_write(tool):
         # Same bug as the CRM write node: a non-timeout envelope is "done".
         state["wrote"] = True
         status = d.get("status") or args.get("status") or ""
         if status:
             state["status"] = status
+        if res.get("error") == "permission_denied" and hasattr(cb, "state"):
+            cb.state("write ignored permission_denied", {"tool": tool})
+        if res.get("ok") and not d and hasattr(cb, "state"):
+            cb.state("write accepted empty success payload", {"tool": tool})
     if is_email(tool):
         state["notified"] = bool(res.get("ok") or not res.get("error"))
     return state

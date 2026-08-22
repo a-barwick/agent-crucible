@@ -32,6 +32,8 @@ type Input struct {
 	Counts   map[judge.Outcome]int
 	ByFault  []cluster.Cluster
 	ByShape  []cluster.Cluster
+	Tools    []string
+	Agent    string
 }
 
 func Write(in Input) Critique {
@@ -60,10 +62,10 @@ func Write(in Input) Critique {
 		switch c.Fault {
 		case fault.Malformed:
 			paras = append(paras, fmt.Sprintf(
-				"When the CRM tool returned a successful response with missing fields (%d trials), the agent recovered %s of the time. The graph treats semantic failure as transport success.",
-				c.N, rate,
+				"When %s returned a successful response with missing fields (%d trials), the agent recovered %s of the time. The graph treats semantic failure as transport success.",
+				writeToolPhrase(in), c.N, rate,
 			))
-			fixes = append(fixes, Fix{Node: "write", Advice: "Add validation before the write node. Required fields on the write tool must be present or the edge should abort."})
+			fixes = append(fixes, Fix{Node: writeNode(in), Advice: "Add validation before the write node. Required fields on the write tool must be present or the edge should abort."})
 		case fault.Timeout:
 			paras = append(paras, fmt.Sprintf(
 				"Timeouts (%d trials) completed %s of the time. lookup/fetch retry once, then abort; a timeout on write skips a consistent notify, leaving the world half-done or claiming a write that never landed.",
@@ -153,8 +155,8 @@ func pickHeadline(in Input, fallback string) string {
 	}
 	if worst.Fault == fault.Malformed && faults <= 2 {
 		return fmt.Sprintf(
-			"The agent completed %s of clean runs but only %s when the CRM tool returned a successful response with missing fields. The graph treats semantic failure as transport success. Add validation before the write node.",
-			pct(in.Clean), pct(worst.Rate),
+			"The agent completed %s of clean runs but only %s when %s returned a successful response with missing fields. The graph treats semantic failure as transport success. Add validation before the write node.",
+			pct(in.Clean), pct(worst.Rate), writeToolPhrase(in),
 		)
 	}
 	if worst.Fault != "" {
@@ -177,6 +179,37 @@ func dominantFault(cs []cluster.Cluster) cluster.Cluster {
 		}
 	}
 	return best
+}
+
+func writeToolPhrase(in Input) string {
+	for _, t := range in.Tools {
+		if t != "" && t != "write_deal" && (len(t) > 0) {
+			low := t
+			if containsAny(low, "write", "update", "patch", "create", "delete") {
+				return t
+			}
+		}
+	}
+	return "the CRM tool"
+}
+
+func writeNode(in Input) string {
+	for _, t := range in.Tools {
+		if containsAny(t, "write", "update", "patch") {
+			return t
+		}
+	}
+	return "write"
+}
+
+func containsAny(s string, parts ...string) bool {
+	low := strings.ToLower(s)
+	for _, p := range parts {
+		if strings.Contains(low, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func pct(f float64) string {

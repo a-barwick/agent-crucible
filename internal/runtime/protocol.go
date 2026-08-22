@@ -13,6 +13,8 @@ type RunRequest struct {
 	Companies []string     `json:"companies"`
 	Partial   bool         `json:"partial"`
 	Spec      *agent.Spec  `json:"spec,omitempty"`
+	Entry     string       `json:"entry,omitempty"`
+	Export    string       `json:"export,omitempty"`
 	Callback  string       `json:"callback"`
 	Token     string       `json:"token"`
 	Model     string       `json:"model,omitempty"`
@@ -43,6 +45,11 @@ type BeforeResp struct {
 	Memory    agent.Memory `json:"memory"`
 	Junk      string       `json:"junk"`
 	Intent    agent.Intent `json:"intent"`
+}
+
+type StateReq struct {
+	Message string         `json:"message"`
+	Data    map[string]any `json:"data,omitempty"`
 }
 
 type Status struct {

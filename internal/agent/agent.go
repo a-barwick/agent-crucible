@@ -20,6 +20,9 @@ type Spec struct {
 	NodeTools   map[string]NodeBinding `json:"node_tools,omitempty"`
 	Companies   []string               `json:"companies,omitempty"`
 	Objective   string                 `json:"objective,omitempty"`
+	Entry       string                 `json:"entry,omitempty"`    // Python file or module the sidecar imports
+	Export      string                 `json:"export,omitempty"`   // run | build | graph | named callable
+	Endpoint    string                 `json:"endpoint,omitempty"` // arbitrary process speaking POST /v1/run
 	Bugs        []Bug                  `json:"bugs"`
 }
 

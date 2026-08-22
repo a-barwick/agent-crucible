@@ -51,12 +51,15 @@ func usage() {
 
 Usage:
   crucible serve     [-addr :8080]
-  crucible run       [-seed 42] [-trials 40] [-p 0.3] [-agent aether-closer] [-scenario close-acme] [-faults ...] [-json]
+  crucible run       [-seed 42] [-trials 40] [-p 0.3] [-agent aether-closer] [-scenario close-acme]
+                     [-entry examples/ticket_graph.py] [-endpoint http://127.0.0.1:8092]
+                     [-spec examples/ticket.json] [-faults all] [-json]
   crucible replay    [-seed 42] [-trial 0] [-p 0.3] [-agent ...] [-scenario ...] [-json]
   crucible agents
   crucible scenarios
   crucible generate  [-n 5] [-json]
 
+Give it an agent file (entry), an HTTP process (endpoint), or a pasted spec.
 The runner is deterministic. Same seed, trial, p, and fault set replay bit-for-bit.
 AI generates scenarios, scores ambiguous traces, and explains patterns. It does not pick faults.
 `)
@@ -83,7 +86,11 @@ func serveCmd(args []string) {
 
 func runCmd(args []string) {
 	cfg, asJSON := flags(args, false)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	timeout := 30 * time.Second
+	if agent.NeedsPython(cfg.Agent, cfg.Spec) {
+		timeout = 120 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	suite := harness.Run(ctx, cfg)
 	if asJSON {
@@ -121,11 +128,14 @@ func replayCmd(args []string) {
 	p := fs.Float64("p", 0.30, "failure probability")
 	faults := fs.String("faults", "", "comma-separated fault types")
 	ag := fs.String("agent", agent.IDCloser, "agent id")
-	scn := fs.String("scenario", scenario.CloseAcmeID, "scenario id")
+	scn := fs.String("scenario", "", "scenario id")
+	specFile := fs.String("spec", "", "JSON file with spec and optional scenario")
+	entry := fs.String("entry", "", "Python agent file to drop in")
+	endpoint := fs.String("endpoint", "", "HTTP process speaking POST /v1/run")
 	asJSON := fs.Bool("json", false, "print JSON")
 	_ = fs.Parse(args)
-	cfg := harness.Config{Seed: *seed, Trials: *trials, P: *p, Faults: parseFaults(*faults), Agent: *ag, Scenario: *scn}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	cfg := attachDropIn(harness.Config{Seed: *seed, Trials: *trials, P: *p, Faults: parseFaults(*faults), Agent: *ag, Scenario: *scn}, *specFile, *entry, *endpoint)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	tr := harness.Replay(ctx, cfg, *n)
 	if *asJSON {
@@ -156,12 +166,67 @@ func flags(args []string, _ bool) (harness.Config, bool) {
 	seed := fs.Int64("seed", 42, "suite seed")
 	trials := fs.Int("trials", 40, "trial count")
 	p := fs.Float64("p", 0.30, "tool failure probability")
-	faults := fs.String("faults", "", "comma-separated fault types (default: MVP five)")
-	ag := fs.String("agent", agent.IDCloser, "agent id (aether-closer, aether-closer-langgraph, aether-closer-adk, pasted)")
-	scn := fs.String("scenario", scenario.CloseAcmeID, "scenario id")
+	faults := fs.String("faults", "", "comma-separated fault types, or 'all'")
+	ag := fs.String("agent", agent.IDCloser, "agent id")
+	scn := fs.String("scenario", "", "scenario id")
+	specFile := fs.String("spec", "", "JSON file with spec and optional scenario")
+	entry := fs.String("entry", "", "Python agent file to drop in")
+	endpoint := fs.String("endpoint", "", "HTTP process speaking POST /v1/run")
 	asJSON := fs.Bool("json", false, "print JSON")
 	_ = fs.Parse(args)
-	return harness.Config{Seed: *seed, Trials: *trials, P: *p, Faults: parseFaults(*faults), Agent: *ag, Scenario: *scn}, *asJSON
+	cfg := attachDropIn(harness.Config{
+		Seed: *seed, Trials: *trials, P: *p, Faults: parseFaults(*faults),
+		Agent: *ag, Scenario: *scn,
+	}, *specFile, *entry, *endpoint)
+	return cfg, *asJSON
+}
+
+func attachDropIn(cfg harness.Config, specFile, entry, endpoint string) harness.Config {
+	if specFile != "" {
+		raw, err := os.ReadFile(specFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		var bundle scenario.Bundle
+		if err := json.Unmarshal(raw, &bundle); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		cfg.Bundle = &bundle
+		if cfg.Agent == agent.IDCloser {
+			cfg.Agent = agent.IDPasted
+		}
+	}
+	if entry != "" {
+		if cfg.Bundle != nil {
+			cfg.Bundle.Spec.Entry = entry
+		} else {
+			spec := agent.Spec{Entry: entry, Runtime: "langgraph"}
+			if cfg.Spec != nil {
+				spec = *cfg.Spec
+				spec.Entry = entry
+			}
+			cfg.Spec = &spec
+		}
+		if cfg.Agent == agent.IDCloser {
+			cfg.Agent = agent.IDPasted
+		}
+	}
+	if endpoint != "" {
+		if cfg.Bundle != nil {
+			cfg.Bundle.Spec.Endpoint = endpoint
+		} else if cfg.Spec != nil {
+			cfg.Spec.Endpoint = endpoint
+		} else {
+			cfg.Spec = &agent.Spec{Endpoint: endpoint}
+		}
+		cfg.RuntimeURL = endpoint
+		if cfg.Agent == agent.IDCloser {
+			cfg.Agent = agent.IDRemote
+		}
+	}
+	return cfg
 }
 
 func agentsCmd() {
@@ -205,6 +270,9 @@ func parseFaults(s string) []fault.Type {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return nil
+	}
+	if s == "all" {
+		return append([]fault.Type(nil), fault.All...)
 	}
 	var out []fault.Type
 	for _, p := range strings.Split(s, ",") {

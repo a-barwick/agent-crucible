@@ -95,7 +95,7 @@ func (t Type) Blurb() string {
 	case StaleMemory:
 		return "Checkpoint memory overwrites a fresh fetch with last week's deal."
 	case Permission:
-		return "write_deal comes back 403. The write node treats any response as done."
+		return "The write tool comes back 403. The write node treats any response as done."
 	case PartialModel:
 		return "The planner emits truncated intent — close the deal, forget the email."
 	case ContextPressure:

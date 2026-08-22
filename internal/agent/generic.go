@@ -150,6 +150,7 @@ func (a *Generic) toolNode(name string, bind NodeBinding) NodeFunc {
 		for arg, path := range bind.ArgsFrom {
 			args[arg] = stateValue(st, path)
 		}
+		hijackReadArgs(st, bind.Tool, args, rec)
 		res, err := callRetry(ctx, bus, rec, bind.Tool, args)
 		if err != nil {
 			return "abort", err
@@ -159,6 +160,7 @@ func (a *Generic) toolNode(name string, bind NodeBinding) NodeFunc {
 			return "abort", nil
 		}
 		applySaves(st, res.Data, bind.Save)
+		overwriteFromMemory(st, bind.Tool, rec)
 		if schema.IsWriteLike(bind.Tool) {
 			// Same bug as the CRM write node: a non-timeout envelope is "done".
 			st.Wrote = true
@@ -167,12 +169,58 @@ func (a *Generic) toolNode(name string, bind NodeBinding) NodeFunc {
 			} else if s := schema.StringField(args, "status"); s != "" {
 				st.Status = s
 			}
+			if res.Error == "permission_denied" {
+				rec.State("write ignored permission_denied", map[string]any{"tool": bind.Tool})
+			}
+			if res.OK && (res.Data == nil || len(res.Data) == 0) {
+				rec.State("write accepted empty success payload", map[string]any{"tool": bind.Tool})
+			}
 		}
 		if schema.IsEmailLike(bind.Tool) {
 			st.Notified = res.OK || res.Error == ""
 		}
 		return nextFrom(a.spec.Graph, name), nil
 	}
+}
+
+func hijackReadArgs(st *State, tool string, args map[string]any, rec *trace.Recorder) {
+	if schema.IsWriteLike(tool) || schema.IsEmailLike(tool) || schema.IsPermissionLike(tool) {
+		return
+	}
+	if st.Junk == "" {
+		return
+	}
+	hijack := lastCompany(st.Junk, st.Companies)
+	if hijack == "" || hijack == st.Intent.Company {
+		return
+	}
+	changed := false
+	for _, k := range []string{"query", "company", "name", "title"} {
+		if _, ok := args[k]; ok {
+			args[k] = hijack
+			changed = true
+		}
+	}
+	if changed {
+		rec.State("lookup hijacked by context ballast", map[string]any{"company": hijack, "tool": tool})
+	}
+}
+
+func overwriteFromMemory(st *State, tool string, rec *trace.Recorder) {
+	if schema.IsWriteLike(tool) || schema.IsEmailLike(tool) || schema.IsPermissionLike(tool) {
+		return
+	}
+	if st.Memory.DealID == "" {
+		return
+	}
+	st.DealID = st.Memory.DealID
+	if st.Memory.DealStatus != "" {
+		st.Status = st.Memory.DealStatus
+	}
+	if st.Memory.Amount != 0 {
+		st.Amount = st.Memory.Amount
+	}
+	rec.State("enrich trusted stale memory", map[string]any{"deal_id": st.DealID, "tool": tool})
 }
 
 func inferBind(name string, spec Spec) NodeBinding {

@@ -2,7 +2,7 @@ import json
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from . import adk_closer, langgraph_closer
+from . import adk_closer, langgraph_closer, loader
 from .callback import Callback
 
 
@@ -44,7 +44,9 @@ class Handler(BaseHTTPRequestHandler):
         cb = Callback(req.get("callback") or "", req.get("token") or "")
         kind = (req.get("runtime") or "langgraph").lower()
         try:
-            if kind == "adk":
+            if loader.has_entry(req):
+                out = loader.run(cb, req)
+            elif kind == "adk":
                 out = adk_closer.run(cb, req)
             else:
                 out = langgraph_closer.run(cb, req)
@@ -57,7 +59,7 @@ def main(argv=None):
     argv = list(argv if argv is not None else sys.argv[1:])
     if argv and argv[0] == "smoke":
         from langgraph.graph import StateGraph  # noqa: F401
-        from . import generic
+        from . import generic, loader
         from .intent import parse_intent
         from .model import CloserPlanner
 
@@ -102,6 +104,10 @@ def main(argv=None):
         if not state.get("wrote") or state.get("status") != "Resolved":
             raise SystemExit("generic walk: %s" % state)
         print("generic-ok", state.get("deal_id"), state.get("status"))
+        path = loader.resolve_entry("examples/ticket_graph.py")
+        if not path.endswith("ticket_graph.py"):
+            raise SystemExit("entry resolve: %s" % path)
+        print("loader-ok", path)
         return
     addr = "127.0.0.1:8091"
     if "--addr" in argv:
