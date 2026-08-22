@@ -11,6 +11,7 @@ import (
 
 // Generic runs a pasted Spec: tool schemas + graph (+ optional node bindings).
 // Standard closer nodes reuse the CRM patient so the same bugs still fire.
+// Custom tool names walk the generic world instead of the CRM switch.
 type Generic struct {
 	spec  Spec
 	clock *clock.Clock
@@ -36,8 +37,14 @@ func NewFromSpec(spec Spec, clk *clock.Clock) Agent {
 		spec.Framework = "generic"
 	}
 	if spec.Graph.Start == "" && len(spec.Graph.Nodes) == 0 {
-		spec.Graph = CRMGraphSpec()
-		spec.Tools = append([]schema.Tool(nil), CRMTools()...)
+		if len(spec.Tools) > 0 && !looksLikeCRM(spec.Tools) {
+			spec.Graph = graphFromTools(spec.Tools)
+		} else {
+			spec.Graph = CRMGraphSpec()
+			if len(spec.Tools) == 0 {
+				spec.Tools = append([]schema.Tool(nil), CRMTools()...)
+			}
+		}
 	}
 	return NewGeneric(spec, clk)
 }
@@ -60,6 +67,9 @@ func (a *Generic) Run(ctx context.Context, st State, bus Bus, rec *trace.Recorde
 	if st.ThreadID == "" {
 		st.ThreadID = "pasted"
 	}
+	if st.Intent.Company == "" && st.Objective != "" {
+		st.Intent = ParseIntentWith(st.Objective, st.Companies)
+	}
 	nodes := map[string]NodeFunc{}
 	for _, name := range a.spec.Graph.Nodes {
 		if name == "end" || name == "abort" {
@@ -69,7 +79,7 @@ func (a *Generic) Run(ctx context.Context, st State, bus Bus, rec *trace.Recorde
 		if bind.Kind == "" {
 			bind = inferBind(name, a.spec)
 		}
-		nodes[name] = a.makeNode(name, bind)
+		nodes[name] = a.remap(name, a.makeNode(name, bind))
 	}
 	start := a.spec.Graph.Start
 	if start == "" {
@@ -109,9 +119,34 @@ func (a *Generic) makeNode(name string, bind NodeBinding) NodeFunc {
 	}
 }
 
+func (a *Generic) remap(name string, fn NodeFunc) NodeFunc {
+	return func(ctx context.Context, st *State, bus Bus, rec *trace.Recorder) (string, error) {
+		next, err := fn(ctx, st, bus, rec)
+		if err != nil {
+			return next, err
+		}
+		if next == "" || next == "end" || next == "abort" {
+			return next, nil
+		}
+		if a.hasNode(next) {
+			return next, nil
+		}
+		return nextFrom(a.spec.Graph, name), nil
+	}
+}
+
+func (a *Generic) hasNode(name string) bool {
+	for _, n := range a.spec.Graph.Nodes {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *Generic) toolNode(name string, bind NodeBinding) NodeFunc {
 	return func(ctx context.Context, st *State, bus Bus, rec *trace.Recorder) (string, error) {
-		args := map[string]any{}
+		args := inferArgs(st, bind.Tool, a.spec)
 		for arg, path := range bind.ArgsFrom {
 			args[arg] = stateValue(st, path)
 		}
@@ -123,11 +158,18 @@ func (a *Generic) toolNode(name string, bind NodeBinding) NodeFunc {
 			st.LastError = res.Error
 			return "abort", nil
 		}
-		for from, to := range bind.Save {
-			setState(st, to, schema.StringField(res.Data, from))
-			if to == "amount" {
-				st.Amount = schema.IntField(res.Data, from)
+		applySaves(st, res.Data, bind.Save)
+		if schema.IsWriteLike(bind.Tool) {
+			// Same bug as the CRM write node: a non-timeout envelope is "done".
+			st.Wrote = true
+			if s := schema.StringField(res.Data, "status"); s != "" {
+				st.Status = s
+			} else if s := schema.StringField(args, "status"); s != "" {
+				st.Status = s
 			}
+		}
+		if schema.IsEmailLike(bind.Tool) {
+			st.Notified = res.OK || res.Error == ""
 		}
 		return nextFrom(a.spec.Graph, name), nil
 	}
@@ -151,20 +193,132 @@ func inferBind(name string, spec Spec) NodeBinding {
 		return NodeBinding{Kind: "notify", Tool: "send_email"}
 	}
 	for _, t := range spec.Tools {
-		if t.Name == name || strings.Contains(name, t.Name) {
+		if t.Name == name || strings.Contains(name, t.Name) || strings.Contains(t.Name, name) {
 			return NodeBinding{Kind: "tool", Tool: t.Name}
+		}
+	}
+	want := schema.Classify(name)
+	if want != schema.KindRead || schema.IsWriteLike(name) || schema.IsEmailLike(name) || schema.IsPermissionLike(name) {
+		for _, t := range spec.Tools {
+			if schema.Classify(t.Name) == want {
+				return NodeBinding{Kind: "tool", Tool: t.Name}
+			}
 		}
 	}
 	return NodeBinding{Kind: "plan"}
 }
 
+func inferArgs(st *State, tool string, spec Spec) map[string]any {
+	args := map[string]any{}
+	t, ok := schema.Find(spec.Tools, tool)
+	required := t.Required
+	if !ok || len(required) == 0 {
+		required = defaultArgNames(tool)
+	}
+	for _, name := range required {
+		if v, ok := argFromState(st, name, schema.Classify(tool)); ok {
+			args[name] = v
+		}
+	}
+	if schema.IsWriteLike(tool) {
+		if s := ActionStatus(st.Intent.DealAction); s != "" {
+			if _, exists := args["status"]; !exists || schema.StringField(args, "status") == "" {
+				args["status"] = s
+			}
+		}
+	}
+	return args
+}
+
+func defaultArgNames(tool string) []string {
+	switch schema.Classify(tool) {
+	case schema.KindWrite:
+		return []string{"id", "status"}
+	case schema.KindEmail:
+		return []string{"to", "subject", "body"}
+	case schema.KindPermission:
+		return []string{"perm"}
+	default:
+		return []string{"query", "company", "id"}
+	}
+}
+
+func argFromState(st *State, name string, kind schema.Kind) (any, bool) {
+	switch name {
+	case "company", "query", "name", "title":
+		if st.Intent.Company != "" {
+			return st.Intent.Company, true
+		}
+	case "id", "record_id", "ticket_id", "deal_id":
+		if st.DealID != "" {
+			return st.DealID, true
+		}
+	case "contact_id":
+		if st.ContactID != "" {
+			return st.ContactID, true
+		}
+	case "status":
+		if kind == schema.KindWrite {
+			if s := ActionStatus(st.Intent.DealAction); s != "" {
+				return s, true
+			}
+		}
+		if st.Status != "" {
+			return st.Status, true
+		}
+	case "to", "email", "recipient":
+		if st.AE != "" {
+			return st.AE, true
+		}
+	case "perm", "permission":
+		return "crm.write", true
+	case "amount":
+		return st.Amount, true
+	case "owner_id":
+		if st.OwnerID != "" {
+			return st.OwnerID, true
+		}
+	case "close_date":
+		if st.CloseDate != "" {
+			return st.CloseDate, true
+		}
+	case "subject":
+		return "update: " + st.Intent.Company, true
+	case "body", "text":
+		return "deal=" + st.DealID + " status=" + st.Status, true
+	}
+	return nil, false
+}
+
+func applySaves(st *State, data map[string]any, save map[string]string) {
+	if len(save) == 0 {
+		save = map[string]string{
+			"id": "deal_id", "status": "status", "ae": "ae",
+			"email": "ae", "amount": "amount", "owner_id": "owner_id",
+			"contact_id": "contact_id",
+		}
+	}
+	for from, to := range save {
+		if data == nil {
+			continue
+		}
+		if _, ok := data[from]; !ok {
+			continue
+		}
+		setState(st, to, schema.StringField(data, from))
+		if to == "amount" {
+			st.Amount = schema.IntField(data, from)
+		}
+	}
+}
+
 func stateValue(st *State, path string) any {
 	switch path {
-	case "intent.company", "company":
+	case "intent.company", "company", "query", "name":
 		return st.Intent.Company
 	case "contact_id":
 		return st.ContactID
-	case "deal_id", "id":
+	case "deal_id", "id", "record_id", "ticket_id":
 		return st.DealID
 	case "ae":
 		return st.AE
@@ -187,7 +341,7 @@ func setState(st *State, field, val string) {
 		st.ContactID = val
 	case "ae":
 		st.AE = val
-	case "deal_id", "id":
+	case "deal_id", "id", "record_id", "ticket_id":
 		st.DealID = val
 	case "status":
 		st.Status = val
@@ -205,4 +359,28 @@ func nextFrom(g GraphSpec, from string) string {
 		}
 	}
 	return "end"
+}
+
+func looksLikeCRM(tools []schema.Tool) bool {
+	for _, t := range tools {
+		switch t.Name {
+		case "lookup_contact", "get_deal", "write_deal", "send_email", "check_permission":
+			return true
+		}
+	}
+	return false
+}
+
+func graphFromTools(tools []schema.Tool) GraphSpec {
+	nodes := []string{"plan"}
+	edges := []Edge{}
+	prev := "plan"
+	for _, t := range tools {
+		nodes = append(nodes, t.Name)
+		edges = append(edges, Edge{From: prev, To: t.Name})
+		prev = t.Name
+	}
+	edges = append(edges, Edge{From: prev, To: "end"})
+	nodes = append(nodes, "end", "abort")
+	return GraphSpec{Start: "plan", Nodes: nodes, Edges: edges}
 }

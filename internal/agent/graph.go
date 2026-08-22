@@ -125,6 +125,9 @@ func ParseIntentWith(objective string, companies []string) Intent {
 		in.Notify = false
 	case containsFold(objective, "On-Hold") || containsFold(objective, "on hold") || containsFold(objective, "do not close") || containsFold(objective, "Stop."):
 		in.DealAction = "on_hold"
+	case containsFold(objective, "resolve"):
+		in.DealAction = "resolve"
+		in.Notify = false
 	case containsFold(objective, "Closed-Won") || containsFold(objective, "close"):
 		in.DealAction = "close_won"
 	default:
@@ -158,4 +161,20 @@ func ParseModelIntent(text, fallback string, companies []string) Intent {
 
 func containsFold(s, sub string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
+}
+
+// ActionStatus is the world status a deal action is supposed to write.
+func ActionStatus(action string) string {
+	switch action {
+	case "close_won":
+		return "Closed-Won"
+	case "on_hold":
+		return "On-Hold"
+	case "refund":
+		return "Refunded"
+	case "resolve":
+		return "Resolved"
+	default:
+		return ""
+	}
 }

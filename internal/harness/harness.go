@@ -19,6 +19,7 @@ import (
 	"github.com/a-barwick/agent-crucible/internal/rng"
 	"github.com/a-barwick/agent-crucible/internal/runtime"
 	"github.com/a-barwick/agent-crucible/internal/scenario"
+	"github.com/a-barwick/agent-crucible/internal/schema"
 	"github.com/a-barwick/agent-crucible/internal/trace"
 )
 
@@ -204,21 +205,21 @@ func Replay(ctx context.Context, cfg Config, n int) Trial {
 
 func runOne(ctx context.Context, cfg Config, n int) Trial {
 	scn := scenario.Get(cfg.Scenario)
+	spec := specOf(cfg)
 	if cfg.Bundle != nil {
-		if cfg.Bundle.Scenario.Objective != "" || cfg.Bundle.Scenario.ID != "" {
-			scn = cfg.Bundle.Scenario
-		}
-		if scn.Expect.DealID == "" {
-			scn.Expect = judge.DefaultExpect()
-			if scn.Objective != "" {
-				scn.Expect.Objective = scn.Objective
-			}
+		b := cfg.Bundle.Scenario
+		if b.Objective != "" || b.ID != "" || b.Expect.Specified() || b.Fixture != nil {
+			scn = b
 		}
 	}
+	scn.Expect = resolveExpect(scn)
 
 	r := rng.Stream(cfg.Seed, n)
 	clk := clock.New()
 	w := scn.World()
+	if spec != nil && len(spec.Tools) > 0 {
+		w.BindTools(spec.Tools)
+	}
 	tr := trace.New()
 	rec := tr.Recorder(clk.Now)
 	inj := fault.New(r, cfg.P, cfg.Faults)
@@ -264,8 +265,11 @@ func runOne(ctx context.Context, cfg Config, n int) Trial {
 	}
 
 	expect := scn.Expect
-	if expect.DealID == "" {
+	if !expect.Specified() {
 		expect = judge.DefaultExpect()
+		if scn.Objective != "" {
+			expect.Objective = scn.Objective
+		}
 	}
 	v := judge.Judge(expect, w, tr, res)
 	if v.Ambiguous {
@@ -310,7 +314,7 @@ func (h *nodeHook) BeforeNode(_ context.Context, name string, st *agent.State, r
 			rec.Fault(fault.PartialModel, "plan", "planner emitted a truncated objective (no email)")
 		}
 	}
-	if name == "enrich" || name == "authorize" || name == "write" {
+	if name == "enrich" || name == "authorize" || name == "write" || schema.IsWriteLike(name) {
 		if d := h.inj.Decide(fault.SiteNode, name, fault.ObjectiveChange); d.Fired && d.Type == fault.ObjectiveChange {
 			obj := h.alt
 			if obj == "" {
@@ -321,6 +325,31 @@ func (h *nodeHook) BeforeNode(_ context.Context, name string, st *agent.State, r
 			rec.Fault(fault.ObjectiveChange, name, "user cancelled the close after "+name+" was already scheduled")
 		}
 	}
+}
+
+func specOf(cfg Config) *agent.Spec {
+	if cfg.Bundle != nil {
+		s := cfg.Bundle.Spec
+		if s.Name != "" || len(s.Tools) > 0 || len(s.Graph.Nodes) > 0 {
+			return &s
+		}
+	}
+	return cfg.Spec
+}
+
+func resolveExpect(scn scenario.Scenario) judge.Expect {
+	e := scn.Expect
+	if e.Objective == "" {
+		e.Objective = scn.Objective
+	}
+	if e.Specified() {
+		return e
+	}
+	def := judge.DefaultExpect()
+	if e.Objective != "" {
+		def.Objective = e.Objective
+	}
+	return def
 }
 
 func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent.Checkpointer) (agent.Agent, error) {

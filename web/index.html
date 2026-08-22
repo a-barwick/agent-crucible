@@ -35,7 +35,7 @@
   </section>
   <div class="paste" id="paste-panel" hidden>
     <p class="section-kicker">Drop tool schemas and a graph</p>
-    <textarea id="paste-spec" rows="10" placeholder='{"spec":{"name":"my-closer","framework":"generic","tools":[],"graph":{"start":"plan","nodes":[],"edges":[]}},"scenario":{"id":"pasted","objective":"…","expect":{}}}'></textarea>
+    <textarea id="paste-spec" rows="10" placeholder='{"spec":{"name":"ticket-bot","tools":[{"name":"search_ticket","required":["query"]},{"name":"update_ticket","required":["id","status"]}]},"scenario":{"objective":"Resolve the Acme Corp ticket.","expect":{"record_id":"tkt-acme","status":"Resolved","writes":1,"emails":0,"notify":false},"fixtures":{"records":[{"id":"tkt-acme","fields":{"company":"Acme Corp","status":"Open"}}]}}}'></textarea>
     <div class="paste-actions">
       <button type="button" id="paste-apply">Load into chamber</button>
       <span class="hint" id="paste-hint">The chamber stays on this side of the tools.</span>

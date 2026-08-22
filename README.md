@@ -88,9 +88,34 @@ Ambiguous traces (claimed success, world unfinished, no unsafe mutation) go to t
 
 ## Bring your own agent
 
-1. **Paste** a JSON bundle in the UI (`spec.tools`, `spec.graph`, optional `scenario.fixtures` / `expect`).
+1. **Paste** a JSON bundle in the UI (`spec.tools`, optional `spec.graph` / `node_tools`, `scenario.fixtures`, `scenario.expect`).
 2. **Implement** `agent.Agent` in-process.
 3. **Speak the protocol**: `POST /v1/run` with `{callback, token, objective, thread_id}`. Call `POST {callback}/tool` and `POST {callback}/before_node`. LangGraph and ADK sidecars are two implementations.
+
+The world is not CRM-only. Tool names in the spec are classified (`search_*` reads, `update_*` writes, `send_*` / `notify_*` emails, `*permission*` checks) and served from `fixtures.records`. Known CRM names still hit the sample tables. The judge scores `expect` — `record_id` / `status` / `writes` / `emails` / `record_fields` — not hardcoded Acme ids.
+
+Tools without a graph become a linear walk after `plan`. CRM tool names without a graph still compile the sample closer.
+
+```json
+{
+  "spec": {
+    "name": "ticket-bot",
+    "tools": [
+      {"name": "search_ticket", "required": ["query"]},
+      {"name": "update_ticket", "required": ["id", "status"]}
+    ]
+  },
+  "scenario": {
+    "objective": "Resolve the Acme Corp ticket.",
+    "expect": {"record_id": "tkt-acme", "status": "Resolved", "writes": 1, "emails": 0, "notify": false},
+    "fixtures": {
+      "records": [
+        {"id": "tkt-acme", "collection": "tickets", "fields": {"company": "Acme Corp", "status": "Open"}}
+      ]
+    }
+  }
+}
+```
 
 Set `CRUCIBLE_RUNTIME` if the `runtime/` tree is not next to the binary. Planner model: `CRUCIBLE_AGENT_MODEL=scripted` (default) or a live OpenAI-compatible key.
 
@@ -104,8 +129,8 @@ internal/agent/        interfaces, MemorySaver, planner, CRM + generic
 internal/runtime/      Python sidecar client + localhost tool callback
 internal/scenario/     task library
 internal/ai/           generate / evaluate / explain
-internal/world/        in-memory CRM + pasteable fixtures
-internal/judge/        deterministic recovery rules
+internal/world/        CRM tables + generic records; Invoke from spec
+internal/judge/        expect-driven recovery rules
 internal/cluster/      failure fingerprints
 internal/critique/     critique types
 internal/server/       /api/meta /api/run /api/sweep /api/replay /api/generate

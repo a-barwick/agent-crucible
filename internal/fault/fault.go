@@ -213,6 +213,12 @@ type ToolEffect struct {
 }
 
 func ApplyTool(d Decision, tool string, raw schema.Result) ToolEffect {
+	return ApplyToolSpec(d, tool, raw, nil)
+}
+
+// ApplyToolSpec is ApplyTool with the pasted schema so unknown tools
+// still get 403s, hollow successes, and stripped required fields.
+func ApplyToolSpec(d Decision, tool string, raw schema.Result, spec []schema.Tool) ToolEffect {
 	if !d.Fired {
 		return ToolEffect{Result: raw}
 	}
@@ -220,17 +226,23 @@ func ApplyTool(d Decision, tool string, raw schema.Result) ToolEffect {
 	case Timeout:
 		return ToolEffect{SkipWorld: true, Result: schema.Result{OK: false, Error: "timeout"}}
 	case Permission:
-		if tool == "write_deal" || tool == "check_permission" {
-			if tool == "check_permission" {
-				return ToolEffect{SkipWorld: true, Result: schema.Result{OK: true, Data: map[string]any{
-					"perm": "crm.write", "allowed": false,
-				}}}
+		if schema.IsPermissionLike(tool) {
+			perm := "crm.write"
+			if raw.Data != nil {
+				if p := schema.StringField(raw.Data, "perm"); p != "" {
+					perm = p
+				}
 			}
+			return ToolEffect{SkipWorld: true, Result: schema.Result{OK: true, Data: map[string]any{
+				"perm": perm, "allowed": false,
+			}}}
+		}
+		if schema.IsWriteLike(tool) {
 			return ToolEffect{SkipWorld: true, Result: schema.Result{OK: false, Error: "permission_denied"}}
 		}
 		return ToolEffect{Result: raw}
 	case Malformed:
-		return ToolEffect{Result: stripRequired(tool, raw)}
+		return ToolEffect{Result: stripRequired(tool, raw, spec)}
 	case Duplicate:
 		return ToolEffect{Duplicate: true, Result: raw}
 	default:
@@ -238,7 +250,11 @@ func ApplyTool(d Decision, tool string, raw schema.Result) ToolEffect {
 	}
 }
 
-func stripRequired(tool string, raw schema.Result) schema.Result {
+func stripRequired(tool string, raw schema.Result, spec []schema.Tool) schema.Result {
+	if schema.IsWriteLike(tool) {
+		// Transport success, no confirmation of what was written.
+		return schema.Result{OK: true, Data: map[string]any{}}
+	}
 	if !raw.OK || raw.Data == nil {
 		// A failed call that we still mark OK with an empty body — the
 		// classic "CRM returned success with missing fields" lie.
@@ -247,6 +263,17 @@ func stripRequired(tool string, raw schema.Result) schema.Result {
 	data := make(map[string]any, len(raw.Data))
 	for k, v := range raw.Data {
 		data[k] = v
+	}
+	if t, ok := schema.Find(spec, tool); ok {
+		for _, f := range t.Returns {
+			if f.Required {
+				delete(data, f.Name)
+			}
+		}
+		if _, ok := data["id"]; ok {
+			delete(data, "id")
+		}
+		return schema.Result{OK: true, Data: data}
 	}
 	switch tool {
 	case "lookup_contact":
@@ -258,13 +285,14 @@ func stripRequired(tool string, raw schema.Result) schema.Result {
 		delete(data, "owner_id")
 		delete(data, "status")
 	case "write_deal":
-		// Transport success, no confirmation of what was written.
 		return schema.Result{OK: true, Data: map[string]any{}}
 	case "send_email":
 		delete(data, "id")
 		delete(data, "to")
 	case "check_permission":
 		delete(data, "allowed")
+	default:
+		delete(data, "id")
 	}
 	return schema.Result{OK: true, Data: data}
 }
