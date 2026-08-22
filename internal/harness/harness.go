@@ -11,6 +11,7 @@ import (
 	"math"
 	"net"
 	"net/url"
+	"strings"
 
 	"github.com/a-barwick/agent-crucible/internal/agent"
 	"github.com/a-barwick/agent-crucible/internal/ai"
@@ -208,10 +209,13 @@ func Run(ctx context.Context, cfg Config) Suite {
 	})
 
 	return Suite{
-		ID:        fmt.Sprintf("suite-%d-%d-p%.0f", cfg.Seed, cfg.Trials, cfg.P*100),
-		Config:    cfg,
-		Agent:     cfg.Agent,
-		Scenario:  cfg.Scenario,
+		ID:     fmt.Sprintf("suite-%d-%d-p%.0f", cfg.Seed, cfg.Trials, cfg.P*100),
+		Config: cfg,
+		Agent:  cfg.Agent,
+		// The scenario that ran, not the one asked for. A drop-in agent sent
+		// close-acme runs the ticket task; reporting the request made the
+		// results panel and the replay line name a task nobody had run.
+		Scenario:  ranScenario(cfg),
 		Survival:  surv,
 		Safety:    ratio(safe, scored),
 		CleanRate: clean,
@@ -261,7 +265,11 @@ func Replay(ctx context.Context, cfg Config, n int) Trial {
 }
 
 func runOne(ctx context.Context, cfg Config, n int) Trial {
-	scn := resolveScenario(cfg)
+	scn, err := resolveScenario(cfg)
+	if err != nil {
+		// Not the agent's failure, so it is errored rather than scored.
+		return Trial{N: n, Error: err.Error()}
+	}
 	spec := specOf(cfg)
 	scn.Expect = resolveExpect(scn)
 
@@ -404,28 +412,59 @@ func (h *nodeHook) BeforeNode(_ context.Context, name string, st *agent.State, r
 	}
 }
 
-func resolveScenario(cfg Config) scenario.Scenario {
+// resolveScenario returns the scenario the trial will actually run. An id that
+// names nothing is an error rather than a silent fallback: scenario.Get answers
+// close-acme for anything it does not recognise, so a typo or a generated id
+// whose definition never made it into extra_scenarios ran the Acme deal-close
+// task and reported the result under the name that was asked for.
+func resolveScenario(cfg Config) (scenario.Scenario, error) {
 	if cfg.Bundle != nil {
 		b := cfg.Bundle.Scenario
 		if b.Objective != "" || b.ID != "" || b.Expect.Specified() || b.Fixture != nil {
 			if b.ID == "" && cfg.Scenario != "" {
 				b.ID = cfg.Scenario
 			}
-			return b
+			return b, nil
 		}
 	}
 	if agent.IsDropIn(cfg.Agent, specOf(cfg)) && (cfg.Scenario == "" || cfg.Scenario == scenario.CloseAcmeID) {
-		return scenario.Ticket()
+		return scenario.Ticket(), nil
 	}
 	if s, ok := scenario.Lookup(cfg.Scenario); ok {
-		return s
+		return s, nil
 	}
 	for _, s := range cfg.Extra {
 		if s.ID == cfg.Scenario {
-			return s
+			return s, nil
 		}
 	}
-	return scenario.Get(cfg.Scenario)
+	if cfg.Scenario == "" {
+		return scenario.Get(""), nil
+	}
+	return scenario.Scenario{}, fmt.Errorf(
+		"unknown scenario %q; built-in ids are %s. A generated scenario has to be passed with it, in extra_scenarios or bundle.scenario",
+		cfg.Scenario, strings.Join(scenarioIDs(), ", "))
+}
+
+// ranScenario names the scenario a suite actually ran, falling back to the
+// requested id when it could not be resolved at all (the suite carries the
+// error, and naming nothing there would be less informative than naming what
+// was asked for).
+func ranScenario(cfg Config) string {
+	scn, err := resolveScenario(cfg)
+	if err != nil || scn.ID == "" {
+		return cfg.Scenario
+	}
+	return scn.ID
+}
+
+func scenarioIDs() []string {
+	infos := scenario.Summaries()
+	out := make([]string, 0, len(infos))
+	for _, s := range infos {
+		out = append(out, s.ID)
+	}
+	return out
 }
 
 func specOf(cfg Config) *agent.Spec {
