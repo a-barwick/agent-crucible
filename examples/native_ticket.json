@@ -6,8 +6,8 @@
     "entry": "examples/native_ticket.py",
     "export": "run",
     "tools": [
-      {"name": "search_ticket", "required": ["query"], "returns": [{"name": "id", "required": true}, {"name": "status", "required": true}]},
-      {"name": "update_ticket", "required": ["id", "status"], "returns": [{"name": "id", "required": true}, {"name": "status", "required": true}]}
+      {"name": "search_ticket", "required": ["query"], "returns": [{"name": "id", "required": true}, {"name": "status", "required": true}], "http": {"host": "tickets.example", "match": "/search", "method": "GET", "args": {"query": "q"}}},
+      {"name": "update_ticket", "required": ["id", "status"], "returns": [{"name": "id", "required": true}, {"name": "status", "required": true}], "http": {"host": "tickets.example", "match": "/tickets/", "method": "POST", "args": {"id": "$path", "status": "status"}}}
     ],
     "graph": {
       "start": "plan",

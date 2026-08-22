@@ -59,7 +59,7 @@ Usage:
   crucible scenarios
   crucible generate  [-n 5] [-json]
 
-Give it an agent file (entry), an HTTP process (endpoint), or a pasted spec.
+Give it an agent file (entry), a foreign command (spec.command), an HTTP process (endpoint), or a pasted spec.
 The runner is deterministic. Same seed, trial, p, and fault set replay bit-for-bit.
 AI generates scenarios, scores ambiguous traces, and explains patterns. It does not pick faults.
 `)

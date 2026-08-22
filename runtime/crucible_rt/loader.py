@@ -110,6 +110,15 @@ def _call_run(fn, cb, req: dict) -> dict:
 def _invoke_graph(graph: Any, req: dict, cb=None) -> dict:
     if cb is not None and not intercept.takes_callback(getattr(graph, "invoke", None) or (lambda: None)):
         req = intercept.apply_plan_hook(cb, req)
+    thread = req.get("thread_id") or "t"
+    config = {"configurable": {"thread_id": thread}}
+    if _wants_messages(graph):
+        seed = {"messages": [("user", req.get("objective") or "")]}
+        try:
+            result = graph.invoke(seed, config)
+        except TypeError:
+            result = graph.invoke(seed)
+        return _normalize(result, req)
     seed = {
         "objective": req.get("objective") or "",
         "memory": req.get("memory") or {},
@@ -118,12 +127,25 @@ def _invoke_graph(graph: Any, req: dict, cb=None) -> dict:
         "partial": bool(req.get("partial")),
         "steps": 0,
     }
-    thread = req.get("thread_id") or "t"
     try:
-        result = graph.invoke(seed, {"configurable": {"thread_id": thread}})
+        result = graph.invoke(seed, config)
     except TypeError:
         result = graph.invoke(seed)
     return _normalize(result, req)
+
+
+def _wants_messages(graph: Any) -> bool:
+    getter = getattr(graph, "get_input_jsonschema", None)
+    if callable(getter):
+        try:
+            js = getter() or {}
+            props = js.get("properties") or {}
+            return "messages" in props and "objective" not in props
+        except Exception:
+            return False
+    schema = getattr(graph, "input_schema", None)
+    names = getattr(schema, "model_fields", None) or getattr(schema, "__annotations__", None) or {}
+    return "messages" in names and "objective" not in names
 
 
 def _normalize(out: Any, req: dict) -> dict:
@@ -140,11 +162,80 @@ def _normalize(out: Any, req: dict) -> dict:
             rid = claimed.get("record_id") or claimed.get("deal_id") or ""
             if rid and not claimed.get("record_id"):
                 claimed["record_id"] = rid
+            if not claimed.get("record_id"):
+                io = intercept.claim_from_io(claimed)
+                claimed["record_id"] = claimed.get("record_id") or io.get("record_id") or ""
+                claimed["deal_id"] = claimed.get("deal_id") or io.get("deal_id") or ""
+                if not claimed.get("status"):
+                    claimed["status"] = io.get("status") or ""
             out["intent"] = intent
             out["claimed"] = claimed
         return out
+    if isinstance(out, dict) and out.get("messages") is not None:
+        return finish_messages(out, req)
     from . import patient
 
     if not isinstance(out, dict):
         raise TypeError("agent entry must return a dict")
-    return patient.finish(out, req.get("runtime") or "langgraph")
+    filled = patient.finish(out, req.get("runtime") or "langgraph")
+    claimed = filled.get("claimed") or {}
+    if not claimed.get("record_id") and not claimed.get("wrote"):
+        filled["claimed"] = intercept.claim_from_io(claimed)
+    return filled
+
+
+def finish_messages(out: dict, req: dict) -> dict:
+    """Turn a create_react_agent {messages} blob into a chamber result."""
+    import json as _json
+
+    claimed = intercept.claim_from_io()
+    steps = 0
+    for m in out.get("messages") or []:
+        steps += 1
+        name = getattr(m, "name", None) or (m.get("name") if isinstance(m, dict) else "")
+        content = getattr(m, "content", None)
+        if content is None and isinstance(m, dict):
+            content = m.get("content")
+        tool_calls = getattr(m, "tool_calls", None) or (m.get("tool_calls") if isinstance(m, dict) else None) or []
+        if tool_calls:
+            for call in tool_calls:
+                fn = call.get("name") or (call.get("function") or {}).get("name") or ""
+                args = call.get("args") or {}
+                if intercept._writeish(fn):
+                    claimed["wrote"] = True
+                    if isinstance(args, dict) and args.get("status"):
+                        claimed["status"] = args.get("status") or claimed.get("status") or ""
+                    if isinstance(args, dict) and args.get("id"):
+                        claimed["record_id"] = args.get("id") or claimed.get("record_id") or ""
+                        claimed["deal_id"] = claimed["record_id"]
+        if name and intercept._writeish(str(name)):
+            claimed["wrote"] = True
+        if isinstance(content, str) and content.startswith("{"):
+            try:
+                data = _json.loads(content)
+            except Exception:
+                data = {}
+            if isinstance(data, dict):
+                if data.get("id"):
+                    claimed["record_id"] = data["id"]
+                    claimed["deal_id"] = data["id"]
+                if data.get("status"):
+                    claimed["status"] = data["status"]
+                if data.get("error") in ("timeout", "cost_ceiling", "unavailable"):
+                    claimed["error"] = data["error"]
+    intent = out.get("intent") or {}
+    if not intent:
+        from .intent import parse_intent
+
+        intent = parse_intent(req.get("objective") or "", req.get("companies"))
+    err = claimed.get("error") or ""
+    terminal = "abort" if err in ("timeout", "cost_ceiling", "unavailable") and not claimed.get("wrote") else "end"
+    return {
+        "terminal": terminal,
+        "intent": intent,
+        "claimed": claimed,
+        "steps": max(steps, 1),
+        "checkpoint": True,
+        "runtime": req.get("runtime") or "langgraph",
+        "react": True,
+    }

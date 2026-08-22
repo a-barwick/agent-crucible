@@ -215,6 +215,7 @@ func overwriteFromMemory(st *State, tool string, rec *trace.Recorder) {
 		return
 	}
 	st.DealID = id
+	st.RecordID = id
 	if st.Memory.DealStatus != "" {
 		st.Status = st.Memory.DealStatus
 	}
@@ -299,8 +300,8 @@ func argFromState(st *State, name string, kind schema.Kind) (any, bool) {
 			return st.Intent.EntityName(), true
 		}
 	case "id", "record_id", "ticket_id", "deal_id":
-		if st.DealID != "" {
-			return st.DealID, true
+		if id := st.TargetID(); id != "" {
+			return id, true
 		}
 	case "contact_id":
 		if st.ContactID != "" {
@@ -368,7 +369,7 @@ func stateValue(st *State, path string) any {
 	case "contact_id":
 		return st.ContactID
 	case "deal_id", "id", "record_id", "ticket_id":
-		return st.DealID
+		return st.TargetID()
 	case "ae":
 		return st.AE
 	case "status":
@@ -392,6 +393,7 @@ func setState(st *State, field, val string) {
 		st.AE = val
 	case "deal_id", "id", "record_id", "ticket_id":
 		st.DealID = val
+		st.RecordID = val
 	case "status":
 		st.Status = val
 	case "owner_id":

@@ -395,6 +395,9 @@ func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent
 		}
 		return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: kind, URL: spec.Endpoint, Spec: spec})
 	}
+	if spec != nil && spec.Command != "" && (name == agent.IDForeignHTTP || name == agent.IDPasted || spec.Runtime == "wrap") {
+		return runtime.NewWrap(ctx, spec)
+	}
 
 	switch name {
 	case "", agent.IDCloser:
@@ -406,6 +409,9 @@ func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent
 		if spec == nil {
 			return nil, fmt.Errorf("pasted agent needs an entry file, an endpoint, or tool schemas")
 		}
+		if spec.Command != "" && spec.Runtime == "wrap" {
+			return runtime.NewWrap(ctx, spec)
+		}
 		if spec.Entry != "" || spec.Runtime == "langgraph" || spec.Runtime == "adk" {
 			return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: spec.Runtime, URL: cfg.RuntimeURL, Spec: spec})
 		}
@@ -415,7 +421,7 @@ func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent
 			g.Model = agent.ScriptedModel{}
 		}
 		return ag, nil
-	case agent.IDCloserLangGraph, agent.IDTicketLangGraph, agent.IDNativeLangGraph, agent.IDNativeOpenAI:
+	case agent.IDCloserLangGraph, agent.IDTicketLangGraph, agent.IDNativeLangGraph, agent.IDNativeOpenAI, agent.IDNativeReact, agent.IDHTTPClosure:
 		kind := "langgraph"
 		if spec != nil && (agent.JSRuntime(spec.Runtime) || agent.JSEntry(spec.Entry)) {
 			kind = "js"
@@ -423,6 +429,11 @@ func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent
 		return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: kind, URL: cfg.RuntimeURL, Spec: spec})
 	case agent.IDCloserADK, agent.IDTicketADK, agent.IDNativeADK:
 		return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: "adk", URL: cfg.RuntimeURL, Spec: spec})
+	case agent.IDForeignHTTP:
+		if spec != nil && spec.Entry != "" {
+			return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: "langgraph", URL: cfg.RuntimeURL, Spec: spec})
+		}
+		return runtime.NewWrap(ctx, spec)
 	case agent.IDNativeJS:
 		url := cfg.RuntimeURL
 		if spec != nil && spec.Endpoint != "" {
@@ -443,6 +454,9 @@ func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent
 		}
 		return runtime.NewRemote(ctx, runtime.RemoteOpts{Kind: kind, URL: url, Spec: spec})
 	default:
+		if spec != nil && spec.Command != "" && spec.Runtime == "wrap" {
+			return runtime.NewWrap(ctx, spec)
+		}
 		if spec != nil && (spec.Entry != "" || spec.Endpoint != "") {
 			kind := spec.Runtime
 			if kind == "" {
@@ -468,6 +482,12 @@ func hydrateSpec(cfg Config) *agent.Spec {
 		spec = overlaySpec(agent.NativeOpenAISpec(), spec)
 	case agent.IDNativeJS:
 		spec = overlaySpec(agent.NativeJSSpec(), spec)
+	case agent.IDNativeReact:
+		spec = overlaySpec(agent.NativeReactSpec(), spec)
+	case agent.IDHTTPClosure:
+		spec = overlaySpec(agent.HTTPClosureSpec(), spec)
+	case agent.IDForeignHTTP:
+		spec = overlaySpec(agent.ForeignHTTPSpec(), spec)
 	}
 	if spec != nil && spec.Entry != "" {
 		cp := *spec
@@ -496,6 +516,9 @@ func overlaySpec(base agent.Spec, over *agent.Spec) *agent.Spec {
 	}
 	if over.Endpoint != "" {
 		out.Endpoint = over.Endpoint
+	}
+	if over.Command != "" {
+		out.Command = over.Command
 	}
 	if len(over.Tools) > 0 {
 		out.Tools = over.Tools

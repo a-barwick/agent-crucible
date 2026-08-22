@@ -12,7 +12,7 @@
     <div class="brand">
       <p class="eyebrow">Agent Crucible</p>
       <h1>Torture chamber</h1>
-      <p class="lede">Give it an agent — an unmodified LangGraph, a real ADK module, OpenAI tools, or a Node process — and its tool schemas. The chamber intercepts the tools. The runner is deterministic. The model is not invited.</p>
+      <p class="lede">Give it an agent — an unmodified LangGraph, create_react_agent, ADK module, OpenAI tools, a Node process, or a foreign script — and its tool schemas. The chamber intercepts HTTP/SDK calls and tools. The runner is deterministic. The model is not invited.</p>
     </div>
     <div class="agent-chip" id="agent-chip">
       <span class="fw" id="agent-fw">langgraph-go</span>
@@ -35,6 +35,8 @@
     <button type="button" id="load-ticket-adk">Load unmodified ADK</button>
     <button type="button" id="load-native-openai">Load OpenAI tools</button>
     <button type="button" id="load-native-js">Load JS agent</button>
+    <button type="button" id="load-native-react">Load create_react_agent</button>
+    <button type="button" id="load-http-closure">Load HTTP-in-node graph</button>
     <button type="button" id="gen-scenarios">Generate scenarios</button>
   </section>
   <div class="paste" id="paste-panel" hidden>

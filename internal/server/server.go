@@ -65,6 +65,15 @@ func handleMeta(w http.ResponseWriter, _ *http.Request) {
 			agent.IDNativeJS: map[string]any{
 				"spec": agent.NativeJSSpec(), "scenario": scenario.Ticket(),
 			},
+			agent.IDNativeReact: map[string]any{
+				"spec": agent.NativeReactSpec(), "scenario": scenario.Ticket(),
+			},
+			agent.IDHTTPClosure: map[string]any{
+				"spec": agent.HTTPClosureSpec(), "scenario": scenario.Ticket(),
+			},
+			agent.IDForeignHTTP: map[string]any{
+				"spec": agent.ForeignHTTPSpec(), "scenario": scenario.Ticket(),
+			},
 		},
 		"defaults": map[string]any{
 			"seed": 42, "trials": 40, "p": 0, "p_max": 0.30, "step": 0.01,

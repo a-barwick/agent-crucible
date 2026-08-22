@@ -1,4 +1,8 @@
-/** Wrap an unmodified JS agent's own tools so they hit the chamber. */
+/** Wrap an unmodified JS agent's own tools so they hit the chamber.
+
+HTTP/SDK I/O is patched separately (httpio.mjs). wrapCallable runs the
+original body first so fetch inside a tool is what FaultBus sees.
+*/
 
 export class Callback {
   constructor(url, token) {
@@ -72,6 +76,21 @@ export function wrapCallable(fn, name, cb) {
   const wrapped = async (args = {}) => {
     const payload = args && typeof args === "object" && !Array.isArray(args) ? args : { arg: args };
     await cb.before(name);
+    let httpio;
+    try {
+      httpio = await import("./httpio.mjs");
+    } catch {
+      httpio = null;
+    }
+    if (httpio) {
+      const before = httpio.hits();
+      try {
+        const out = await httpio.usingTool(name, () => fn(payload));
+        if (httpio.hits() > before) return out;
+      } catch (err) {
+        if (httpio.hits() > before) throw err;
+      }
+    }
     const res = await cb.tool(name, payload);
     await emitEvidence(cb, name, res);
     return present(res);

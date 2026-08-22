@@ -1,12 +1,17 @@
 """Wrap an unmodified agent's own tools so they hit the chamber.
 
 The user writes @tool / FunctionTool / OpenAI functions / JS callables
-that would call HTTP or Salesforce. After import, this module replaces
-those implementations with callbacks into FaultBus. The graph never
-imports the world and never has to call cb.retry_tool.
+that call HTTP or Salesforce. After import this module:
 
-before() is fired on each wrapped tool (and once on "plan" for native
-run() signatures) so the nine-fault catalog still applies.
+1. Patches urllib / requests / httpx / simple_salesforce so live I/O
+   inside a tool *or* an ordinary closure hits FaultBus.
+2. Wraps discovered tool objects. The original body runs first so the
+   HTTP patch is what fires; if the body never touches the network the
+   wrap falls back to cb.tool (same as before).
+
+The graph never imports the world and never has to call cb.retry_tool.
+before() is fired on each wrapped tool (and once on "plan") so the
+nine-fault catalog still applies.
 """
 
 from __future__ import annotations
@@ -120,9 +125,22 @@ def wrap_callable(fn, name: str, cb):
         return fn
 
     def wrapped(*args, **kwargs):
+        from . import httpio
+
         payload = _bind_args(fn, args, kwargs)
         if hasattr(cb, "before"):
             cb.before(name)
+        if httpio.active():
+            before = httpio.hits()
+            try:
+                with httpio.using_tool(name):
+                    out = fn(*args, **kwargs)
+            except Exception:
+                if httpio.hits() > before:
+                    raise
+            else:
+                if httpio.hits() > before:
+                    return out if out is not None else present(httpio.last_result() or {})
         res = cb.tool(name, payload) if hasattr(cb, "tool") else {}
         _emit_evidence(cb, name, res)
         return present(res)
@@ -206,6 +224,9 @@ def discover_tools(mod, spec: dict | None = None) -> list[tuple[str, Any]]:
 
 def wrap_module(mod, cb, spec: dict | None = None) -> list[str]:
     bind_cb(cb)
+    from . import httpio
+
+    httpio.install(cb, spec)
     wrapped: list[str] = []
     for name, obj in discover_tools(mod, spec):
         new = wrap_tool(obj, cb, name)
@@ -252,3 +273,21 @@ def note(message: str, data: dict | None = None) -> None:
             cb.state(message, data or {})
         except Exception:
             pass
+
+
+def claim_from_io(extra: dict | None = None) -> dict:
+    """Build a claimed blob from intercepted HTTP/tool I/O."""
+    from . import httpio
+
+    snap = httpio.snapshot()
+    extra = extra or {}
+    rid = extra.get("record_id") or extra.get("deal_id") or snap.get("record_id") or ""
+    err = extra.get("error") or snap.get("error") or ""
+    return {
+        "wrote": bool(extra.get("wrote") or snap.get("wrote")),
+        "notified": bool(extra.get("notified")),
+        "deal_id": rid,
+        "record_id": rid,
+        "status": extra.get("status") or snap.get("status") or "",
+        "error": err,
+    }

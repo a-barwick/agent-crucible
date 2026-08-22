@@ -25,6 +25,7 @@ type Spec struct {
 	Entry       string                 `json:"entry,omitempty"`    // Python file or module the sidecar imports
 	Export      string                 `json:"export,omitempty"`   // run | build | graph | named callable
 	Endpoint    string                 `json:"endpoint,omitempty"` // arbitrary process speaking POST /v1/run
+	Command     string                 `json:"command,omitempty"`  // foreign process wrapped by crucible_rt.boot
 	Bugs        []Bug                  `json:"bugs"`
 }
 
@@ -121,6 +122,13 @@ func (c Claim) TargetID() string {
 	return c.DealID
 }
 
+func (st State) TargetID() string {
+	if st.RecordID != "" {
+		return st.RecordID
+	}
+	return st.DealID
+}
+
 // Memory is the checkpoint the graph trusts more than a fresh fetch.
 type Memory struct {
 	DealID       string `json:"deal_id,omitempty"`
@@ -147,6 +155,7 @@ type State struct {
 	ContactID string
 	AE        string
 	DealID    string
+	RecordID  string
 	Status    string
 	Amount    int
 	CloseDate string

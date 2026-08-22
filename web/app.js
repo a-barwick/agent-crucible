@@ -326,6 +326,9 @@
       "native-adk",
       "native-openai",
       "native-js",
+      "native-react",
+      "http-closure",
+      "foreign-http",
     ]);
     if (!keep.has(id)) state.bundle = null;
     sweep();
@@ -334,6 +337,8 @@
   $("load-ticket-adk").addEventListener("click", () => applyPreset("ticket-adk", true));
   $("load-native-openai").addEventListener("click", () => applyPreset("native-openai", true));
   $("load-native-js").addEventListener("click", () => applyPreset("native-js", true));
+  $("load-native-react").addEventListener("click", () => applyPreset("native-react", true));
+  $("load-http-closure").addEventListener("click", () => applyPreset("http-closure", true));
   $("scenario").addEventListener("change", () => {
     const extra = selectedExtra();
     if (extra) {

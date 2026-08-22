@@ -4,10 +4,20 @@ package schema
 // Tool is a JSON-schema-ish contract. The runner uses it to know which
 // fields are required so it can strip them for malformed-result faults.
 type Tool struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Required    []string `json:"required"`
-	Returns     []Field  `json:"returns"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Required    []string  `json:"required"`
+	Returns     []Field   `json:"returns"`
+	HTTP        *HTTPBind `json:"http,omitempty"`
+}
+
+// HTTPBind maps a live HTTP/SDK call onto this tool so the chamber can
+// intercept requests / httpx / urllib / fetch inside a closure.
+type HTTPBind struct {
+	Match  string            `json:"match,omitempty"`
+	Method string            `json:"method,omitempty"`
+	Host   string            `json:"host,omitempty"`
+	Args   map[string]string `json:"args,omitempty"`
 }
 
 // Field is one value in a tool result.

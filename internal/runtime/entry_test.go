@@ -16,7 +16,11 @@ func TestFindEntryTicketGraph(t *testing.T) {
 }
 
 func TestFindEntryNativeAgents(t *testing.T) {
-	for _, name := range []string{"examples/native_ticket.py", "examples/native_adk.py", "examples/native_openai.py", "examples/native_ticket.mjs"} {
+	for _, name := range []string{
+		"examples/native_ticket.py", "examples/native_adk.py", "examples/native_openai.py",
+		"examples/native_ticket.mjs", "examples/native_react.py", "examples/http_closure.py",
+		"examples/foreign_task.py",
+	} {
 		got := FindEntry(name)
 		if got == "" || !fileExists(got) {
 			t.Fatalf("FindEntry %s: %q", name, got)

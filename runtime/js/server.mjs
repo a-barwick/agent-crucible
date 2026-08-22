@@ -6,6 +6,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 import { Callback, wrapTools, applyPlanHook } from "./intercept.mjs";
+import { install as installHTTP } from "./httpio.mjs";
 
 function resolveEntry(entry) {
   if (!entry) throw new Error("empty entry");
@@ -46,6 +47,7 @@ async function handleRun(reqBody) {
   if (!entry) throw new Error("js runtime needs spec.entry");
   const cb = new Callback(reqBody.callback || "", reqBody.token || "");
   const mod = await loadModule(entry);
+  installHTTP(cb, spec);
   if (mod.tools) wrapTools(mod.tools, cb);
   if (mod.DISPATCH) wrapTools(mod.DISPATCH, cb);
   if (mod.FUNCTIONS) wrapTools(mod.FUNCTIONS, cb);

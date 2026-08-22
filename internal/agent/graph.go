@@ -83,11 +83,12 @@ func (g *Graph) Run(ctx context.Context, st *State, bus Bus, rec *trace.Recorder
 }
 
 func claimOf(st *State) Claim {
+	rid := st.TargetID()
 	return Claim{
 		Wrote:    st.Wrote,
 		Notified: st.Notified,
-		DealID:   st.DealID,
-		RecordID: st.DealID,
+		DealID:   rid,
+		RecordID: rid,
 		Status:   st.Status,
 		Error:    st.LastError,
 	}

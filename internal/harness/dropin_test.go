@@ -170,6 +170,9 @@ func TestNativeSourcesHaveNoCallback(t *testing.T) {
 		"examples/native_adk.py",
 		"examples/native_openai.py",
 		"examples/native_ticket.mjs",
+		"examples/native_react.py",
+		"examples/http_closure.py",
+		"examples/foreign_task.py",
 	} {
 		raw, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
@@ -179,6 +182,49 @@ func TestNativeSourcesHaveNoCallback(t *testing.T) {
 		if strings.Contains(body, "cb.retry_tool") || strings.Contains(body, "cb.before") || strings.Contains(body, "from crucible_rt.callback") || strings.Contains(body, "new Callback") {
 			t.Fatalf("%s still talks to the chamber callback", rel)
 		}
+	}
+}
+
+func TestNativeSourcesCallHTTP(t *testing.T) {
+	root := runtime.FindRepoRoot()
+	if root == "" {
+		t.Skip("repo root not found")
+	}
+	for _, rel := range []string{
+		"examples/native_ticket.py",
+		"examples/native_adk.py",
+		"examples/native_openai.py",
+		"examples/native_ticket.mjs",
+		"examples/native_react.py",
+		"examples/http_closure.py",
+		"examples/foreign_task.py",
+	} {
+		raw, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := string(raw)
+		if !strings.Contains(body, "tickets.example") {
+			t.Fatalf("%s does not call tickets.example", rel)
+		}
+		if strings.Contains(body, "was not intercepted") {
+			t.Fatalf("%s still stubs HTTP instead of calling it: %s", rel, body[0:80])
+		}
+	}
+}
+
+func TestHTTPClosureHasNoToolObjects(t *testing.T) {
+	root := runtime.FindRepoRoot()
+	if root == "" {
+		t.Skip("repo root not found")
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "examples/http_closure.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	if strings.Contains(body, "@tool") || strings.Contains(body, "TOOLS =") || strings.Contains(body, "DISPATCH =") {
+		t.Fatalf("http_closure.py should not export tool objects")
 	}
 }
 
@@ -267,6 +313,105 @@ func TestNativeMalformedCollapses(t *testing.T) {
 	text := s.Critique.Headline + " " + strings.Join(s.Critique.Paragraphs, " ")
 	if strings.Contains(text, "CRM tool") {
 		t.Fatalf("native critique still CRM-shaped: %s", text)
+	}
+}
+
+func TestHTTPClosureClean(t *testing.T) {
+	if !runtime.HaveLangGraph() {
+		t.Skip("langgraph not installed")
+	}
+	s := Run(context.Background(), Config{
+		Seed: 3, Trials: 2, P: 0, Agent: agent.IDHTTPClosure, Faults: fault.MVP,
+	})
+	if s.Survival != 1 {
+		t.Fatalf("http-closure survival %v counts=%v", s.Survival, s.Counts)
+		for _, tr := range s.Trials {
+			t.Logf("trial %d %s %s %v", tr.N, tr.Outcome, tr.Reason, tr.Violations)
+		}
+	}
+}
+
+func TestNativeReactClean(t *testing.T) {
+	if !runtime.HaveLangGraph() {
+		t.Skip("langgraph not installed")
+	}
+	s := Run(context.Background(), Config{
+		Seed: 3, Trials: 2, P: 0, Agent: agent.IDNativeReact, Faults: fault.MVP,
+	})
+	if s.Survival != 1 {
+		t.Fatalf("native-react survival %v counts=%v", s.Survival, s.Counts)
+		for _, tr := range s.Trials {
+			t.Logf("trial %d %s %s %v", tr.N, tr.Outcome, tr.Reason, tr.Violations)
+		}
+	}
+}
+
+func TestForeignHTTPClean(t *testing.T) {
+	if !runtime.HaveLangGraph() {
+		t.Skip("python runtime needed")
+	}
+	s := Run(context.Background(), Config{
+		Seed: 3, Trials: 2, P: 0, Agent: agent.IDForeignHTTP, Faults: fault.MVP,
+	})
+	if s.Survival != 1 {
+		t.Fatalf("foreign-http survival %v counts=%v", s.Survival, s.Counts)
+		for _, tr := range s.Trials {
+			t.Logf("trial %d %s %s %v", tr.N, tr.Outcome, tr.Reason, tr.Violations)
+		}
+	}
+}
+
+func TestForeignWrapCommand(t *testing.T) {
+	if !runtime.HaveLangGraph() {
+		t.Skip("python runtime needed")
+	}
+	spec := agent.ForeignHTTPSpec()
+	spec.Entry = ""
+	spec.Runtime = "wrap"
+	s := Run(context.Background(), Config{
+		Seed: 3, Trials: 2, P: 0, Agent: agent.IDPasted, Spec: &spec, Faults: fault.MVP,
+	})
+	if s.Survival != 1 {
+		t.Fatalf("foreign wrap command survival %v counts=%v", s.Survival, s.Counts)
+		for _, tr := range s.Trials {
+			t.Logf("trial %d %s %s %v", tr.N, tr.Outcome, tr.Reason, tr.Violations)
+		}
+	}
+}
+
+func TestHTTPClosureMalformedCollapses(t *testing.T) {
+	if !runtime.HaveLangGraph() {
+		t.Skip("langgraph not installed")
+	}
+	s := Run(context.Background(), Config{
+		Seed: 1, Trials: 12, P: 1, Agent: agent.IDHTTPClosure,
+		Faults: []fault.Type{fault.Malformed},
+	})
+	if s.Survival > 0.25 {
+		t.Fatalf("http-closure malformed should collapse, got %v counts=%v", s.Survival, s.Counts)
+	}
+}
+
+func TestHTTPClosureFullCatalogFires(t *testing.T) {
+	if !runtime.HaveLangGraph() {
+		t.Skip("langgraph not installed")
+	}
+	for _, ft := range fault.All {
+		s := Run(context.Background(), Config{
+			Seed: 4, Trials: 8, P: 1, Agent: agent.IDHTTPClosure,
+			Faults: []fault.Type{ft},
+		})
+		seen := false
+		for _, tr := range s.Trials {
+			for _, f := range tr.Faults {
+				if f == ft {
+					seen = true
+				}
+			}
+		}
+		if !seen {
+			t.Fatalf("fault %s never fired on http-closure counts=%v", ft, s.Counts)
+		}
 	}
 }
 

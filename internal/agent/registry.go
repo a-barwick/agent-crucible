@@ -12,6 +12,9 @@ const (
 	IDNativeADK       = "native-adk"
 	IDNativeOpenAI    = "native-openai"
 	IDNativeJS        = "native-js"
+	IDNativeReact     = "native-react"
+	IDHTTPClosure     = "http-closure"
+	IDForeignHTTP     = "foreign-http"
 	IDRemote          = "remote"
 )
 
@@ -79,6 +82,21 @@ func Catalog(pythonReady, nodeReady bool) []Info {
 			Description: "Unmodified Node agent (examples/native_ticket.mjs). Tools are plain functions.",
 		},
 		{
+			ID: IDNativeReact, Name: "ticket-bot", Framework: "langgraph",
+			Runtime: "python", Available: pythonReady,
+			Description: "Unmodified create_react_agent. Tools call HTTP; the chamber intercepts urllib.",
+		},
+		{
+			ID: IDHTTPClosure, Name: "ticket-bot", Framework: "langgraph",
+			Runtime: "python", Available: pythonReady,
+			Description: "LangGraph nodes call urllib themselves. No @tool objects to wrap.",
+		},
+		{
+			ID: IDForeignHTTP, Name: "ticket-bot", Framework: "http",
+			Runtime: "wrap", Available: pythonReady,
+			Description: "Foreign process. No Callback, no /v1/run. HTTP/SDK intercept via boot wrapper.",
+		},
+		{
 			ID: IDRemote, Name: "remote", Framework: "http",
 			Runtime: "endpoint", Available: true,
 			Description: "Any process that speaks POST /v1/run. The process may wrap tools for an unmodified file.",
@@ -96,18 +114,21 @@ func NeedsPython(id string, spec *Spec) bool {
 	if id == IDNativeJS {
 		return false
 	}
+	if spec != nil && spec.Command != "" && spec.Entry == "" {
+		return false
+	}
 	if spec != nil {
 		if spec.Entry != "" {
 			return true
 		}
 		switch spec.Runtime {
-		case "langgraph", "adk", "openai":
+		case "langgraph", "adk", "openai", "wrap":
 			return true
 		}
 	}
 	switch id {
 	case IDCloserLangGraph, IDCloserADK, IDTicketLangGraph, IDTicketADK,
-		IDNativeLangGraph, IDNativeADK, IDNativeOpenAI:
+		IDNativeLangGraph, IDNativeADK, IDNativeOpenAI, IDNativeReact, IDHTTPClosure, IDForeignHTTP:
 		return true
 	}
 	return false
@@ -130,7 +151,8 @@ func NeedsNode(id string, spec *Spec) bool {
 func DropIn(id string) bool {
 	switch id {
 	case IDTicketLangGraph, IDTicketADK, IDRemote,
-		IDNativeLangGraph, IDNativeADK, IDNativeOpenAI, IDNativeJS:
+		IDNativeLangGraph, IDNativeADK, IDNativeOpenAI, IDNativeJS,
+		IDNativeReact, IDHTTPClosure, IDForeignHTTP:
 		return true
 	}
 	return false
@@ -141,7 +163,7 @@ func IsDropIn(id string, spec *Spec) bool {
 	if DropIn(id) {
 		return true
 	}
-	if spec != nil && (spec.Entry != "" || spec.Endpoint != "") {
+	if spec != nil && (spec.Entry != "" || spec.Endpoint != "" || spec.Command != "") {
 		return !LooksLikeCRM(spec.Tools)
 	}
 	return false

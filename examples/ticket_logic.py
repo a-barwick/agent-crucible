@@ -1,11 +1,19 @@
 """Shared ticket-task helpers. No chamber imports at module level.
 
-Native LangGraph / ADK / OpenAI agents reuse this so the patient bugs
-stay in one place: transport success is a write, stale memory wins,
+Native LangGraph / ADK / OpenAI / react agents reuse this so the patient
+bugs stay in one place: transport success is a write, stale memory wins,
 junk context hijacks lookup, and the planned intent is never re-parsed.
+
+http_json is a real urllib call. Outside the chamber it hits the network
+(or raises). Inside the chamber, crucible_rt.httpio rewrites it.
 """
 
 from __future__ import annotations
+
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
 
 STATUS = {
     "close_won": "Closed-Won",
@@ -72,6 +80,40 @@ def as_data(res: dict | None) -> dict:
         return dict(res["data"])
     skip = {"ok", "error"}
     return {k: v for k, v in res.items() if k not in skip}
+
+
+def http_json(method: str, url: str, params: dict | None = None, body: dict | None = None, headers: dict | None = None) -> dict:
+    """Call a JSON HTTP API. The chamber intercepts this at urllib."""
+    if params:
+        url = url + ("&" if "?" in url else "?") + urllib.parse.urlencode(params)
+    hdrs = {"Accept": "application/json", "Content-Type": "application/json"}
+    if headers:
+        hdrs.update(headers)
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            raw = resp.read().decode() or "{}"
+            return json.loads(raw)
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode() if e.fp else ""
+        try:
+            parsed = json.loads(raw or "{}")
+        except json.JSONDecodeError:
+            parsed = {"ok": False, "error": f"http_{e.code}"}
+        if not parsed.get("error"):
+            if e.code == 403:
+                parsed["error"] = "permission_denied"
+            elif e.code in (408, 504, 598):
+                parsed["error"] = "timeout"
+            else:
+                parsed["error"] = f"http_{e.code}"
+        parsed.setdefault("ok", False)
+        return parsed
+    except Exception as e:
+        text = str(e).lower()
+        err = "timeout" if "time" in text or "timeout" in type(e).__name__.lower() else "unavailable"
+        return {"ok": False, "error": err}
 
 
 def note(message: str, data: dict | None = None) -> None:

@@ -19,6 +19,10 @@ func TicketTools() []schema.Tool {
 				{Name: "status", Type: "string", Required: true},
 				{Name: "company", Type: "string", Required: true},
 			},
+			HTTP: &schema.HTTPBind{
+				Host: "tickets.example", Match: "/search", Method: "GET",
+				Args: map[string]string{"query": "q"},
+			},
 		},
 		{
 			Name:        "update_ticket",
@@ -27,6 +31,10 @@ func TicketTools() []schema.Tool {
 			Returns: []schema.Field{
 				{Name: "id", Type: "string", Required: true},
 				{Name: "status", Type: "string", Required: true},
+			},
+			HTTP: &schema.HTTPBind{
+				Host: "tickets.example", Match: "/tickets/", Method: "POST",
+				Args: map[string]string{"id": "$path", "status": "status"},
 			},
 		},
 	}
@@ -129,6 +137,49 @@ func NativeJSSpec() Spec {
 		"Unmodified Node agent. Plain tool functions the Node sidecar wraps.",
 	)
 	s.Export = "run"
+	return s
+}
+
+func NativeReactSpec() Spec {
+	s := ticketBase(
+		"langgraph",
+		"examples/native_react.py",
+		"langgraph",
+		"Unmodified create_react_agent. Tools call the ticket HTTP API. Chamber intercepts urllib.",
+	)
+	s.Export = "run"
+	return s
+}
+
+func HTTPClosureSpec() Spec {
+	s := ticketBase(
+		"langgraph",
+		"examples/http_closure.py",
+		"langgraph",
+		"LangGraph whose nodes call urllib themselves. No @tool objects. HTTP intercept only.",
+	)
+	s.Export = "run"
+	s.Graph = GraphSpec{
+		Start: "plan",
+		Nodes: []string{"plan", "search", "update", "end", "abort"},
+		Edges: []Edge{
+			{From: "plan", To: "search"},
+			{From: "search", To: "update"},
+			{From: "update", To: "end"},
+		},
+	}
+	return s
+}
+
+func ForeignHTTPSpec() Spec {
+	s := ticketBase(
+		"wrap",
+		"examples/foreign_task.py",
+		"http",
+		"Foreign process. No Callback, no /v1/run. Chamber wraps it and intercepts HTTP.",
+	)
+	s.Export = "run"
+	s.Command = "examples/foreign_task.py"
 	return s
 }
 

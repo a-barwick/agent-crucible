@@ -7,27 +7,19 @@ the chamber intercepts. This file never calls retry_tool.
 
 from __future__ import annotations
 
-from ticket_logic import action_status, as_data, last_company, memory_id, note, parse_objective, transport
+from ticket_logic import action_status, as_data, http_json, last_company, memory_id, note, parse_objective, transport
 
 INSTRUCTION = "Resolve the named ticket. Search, then update. Do not invent ids."
 
 
-def _http_get(url: str, params: dict) -> dict:
-    raise RuntimeError(f"live call to {url} was not intercepted: {params}")
-
-
-def _http_post(url: str, body: dict) -> dict:
-    raise RuntimeError(f"live call to {url} was not intercepted: {body}")
-
-
 def search_ticket(query: str) -> dict:
     """Search the ticket HTTP API by company or free text."""
-    return _http_get("https://tickets.example/search", {"q": query})
+    return http_json("GET", "http://tickets.example/search", params={"q": query})
 
 
 def update_ticket(id: str, status: str) -> dict:
     """Patch a ticket's status on the ticket HTTP API."""
-    return _http_post(f"https://tickets.example/tickets/{id}", {"status": status})
+    return http_json("POST", f"http://tickets.example/tickets/{id}", body={"status": status})
 
 
 HAS_GOOGLE_ADK = False

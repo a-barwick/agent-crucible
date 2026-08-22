@@ -1,15 +1,14 @@
-"""An unmodified LangGraph agent. No chamber callback.
+"""An unmodified LangGraph whose nodes call HTTP themselves.
 
-Tools are ordinary @tool functions that call the ticket HTTP API with
-urllib. The chamber intercepts those HTTP calls (and the tool objects)
-after import. This file never imports Callback and never calls retry_tool.
+The graph is ordinary closures that urllib the ticket API. Nothing is
+exported as a LangChain or ADK tool object. The chamber intercepts at
+the socket — not by wrapping a discovered callable.
 """
 
 from __future__ import annotations
 
 from typing import Any, TypedDict
 
-from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
 
 try:
@@ -20,21 +19,6 @@ except ImportError:  # pragma: no cover
 from ticket_logic import action_status, as_data, http_json, last_company, memory_id, note, parse_objective, transport
 
 
-@tool
-def search_ticket(query: str) -> dict:
-    """Search the ticket HTTP API by company or free text."""
-    return http_json("GET", "http://tickets.example/search", params={"q": query})
-
-
-@tool
-def update_ticket(id: str, status: str) -> dict:
-    """Patch a ticket's status on the ticket HTTP API."""
-    return http_json("POST", f"http://tickets.example/tickets/{id}", body={"status": status})
-
-
-TOOLS = [search_ticket, update_ticket]
-
-
 class TicketState(TypedDict, total=False):
     objective: str
     intent: dict
@@ -43,11 +27,9 @@ class TicketState(TypedDict, total=False):
     companies: list
     query: str
     ticket_id: str
-    deal_id: str
     record_id: str
     status: str
     wrote: bool
-    notified: bool
     last_error: str
     terminal: str
     steps: int
@@ -71,7 +53,7 @@ def build():
         if hijack and hijack != query:
             query = hijack
             note("lookup hijacked by context ballast", {"company": query, "tool": "search_ticket"})
-        res = search_ticket.invoke({"query": query})
+        res = http_json("GET", "http://tickets.example/search", params={"q": query})
         st["steps"] = int(st.get("steps") or 0) + 1
         if transport(res):
             st["last_error"] = res.get("error") or "timeout"
@@ -79,40 +61,36 @@ def build():
             return st
         d = as_data(res)
         st["ticket_id"] = d.get("id") or ""
-        st["deal_id"] = st["ticket_id"]
         st["record_id"] = st["ticket_id"]
         st["status"] = d.get("status") or ""
         mid = memory_id(st.get("memory"))
         if mid:
             st["ticket_id"] = mid
-            st["deal_id"] = mid
             st["record_id"] = mid
             mem = st.get("memory") or {}
             if mem.get("deal_status"):
                 st["status"] = mem["deal_status"]
-            note("enrich trusted stale memory", {"deal_id": mid, "record_id": mid, "tool": "search_ticket"})
+            note("enrich trusted stale memory", {"record_id": mid, "tool": "search_ticket"})
         return st
 
     def update(state: TicketState) -> dict:
         st = dict(state)
-        # BUG: planned intent wins. A mid-run objective change is ignored.
         status = action_status(st.get("intent"))
-        res = update_ticket.invoke({
-            "id": st.get("ticket_id") or st.get("record_id") or st.get("deal_id") or "",
-            "status": status,
-        })
+        res = http_json(
+            "POST",
+            "http://tickets.example/tickets/" + str(st.get("ticket_id") or st.get("record_id") or ""),
+            body={"status": status},
+        )
         st["steps"] = int(st.get("steps") or 0) + 1
         if transport(res):
             st["last_error"] = res.get("error") or "timeout"
             st["terminal"] = "abort"
             return st
-        # BUG: any non-timeout envelope is a successful write.
         st["wrote"] = True
         st["status"] = status
         did = as_data(res).get("id")
         if did:
             st["ticket_id"] = did
-            st["deal_id"] = did
             st["record_id"] = did
         st["terminal"] = "end"
         return st
@@ -127,27 +105,24 @@ def build():
 
     g = StateGraph(TicketState)
     g.add_node("plan", plan)
-    g.add_node("search_ticket", search)
-    g.add_node("update_ticket", update)
+    g.add_node("search", search)
+    g.add_node("update", update)
     g.add_edge(START, "plan")
-    g.add_conditional_edges("plan", route("search_ticket"))
-    g.add_conditional_edges("search_ticket", route("update_ticket"))
-    g.add_conditional_edges("update_ticket", route(END))
+    g.add_conditional_edges("plan", route("search"))
+    g.add_conditional_edges("search", route("update"))
+    g.add_conditional_edges("update", route(END))
     return g.compile(checkpointer=InMemorySaver())
-
-
-graph = None
 
 
 def finish(state: dict, runtime: str = "langgraph") -> dict:
     intent = state.get("intent") or {}
-    rid = state.get("record_id") or state.get("ticket_id") or state.get("deal_id") or ""
+    rid = state.get("record_id") or state.get("ticket_id") or ""
     return {
         "terminal": state.get("terminal") or "end",
         "intent": intent,
         "claimed": {
             "wrote": bool(state.get("wrote")),
-            "notified": bool(state.get("notified")),
+            "notified": False,
             "deal_id": rid,
             "record_id": rid,
             "status": state.get("status") or "",
@@ -156,8 +131,8 @@ def finish(state: dict, runtime: str = "langgraph") -> dict:
         "steps": int(state.get("steps") or 0),
         "checkpoint": True,
         "runtime": runtime,
-        "entry": "examples/native_ticket.py",
-        "intercepted": True,
+        "entry": "examples/http_closure.py",
+        "http_intercept": True,
     }
 
 
@@ -170,5 +145,5 @@ def run(req: dict) -> dict:
         "companies": req.get("companies") or ["Acme Corp", "Globex"],
         "steps": 0,
     }
-    result = compiled.invoke(seed, {"configurable": {"thread_id": req.get("thread_id") or "ticket"}})
+    result = compiled.invoke(seed, {"configurable": {"thread_id": req.get("thread_id") or "closure"}})
     return finish(result, req.get("runtime") or "langgraph")

@@ -1,15 +1,24 @@
 /** An unmodified JS tool-using agent. No chamber callback.
 
-Tools would hit the ticket HTTP API. The Node sidecar wraps `tools`
-after import so invocations go through FaultBus.
+Tools hit the ticket HTTP API with fetch. The Node sidecar patches
+fetch (and wraps `tools`) so invocations go through FaultBus.
 */
+
+async function httpJson(url, opts = {}) {
+  const res = await fetch(url, opts);
+  return res.json();
+}
 
 export const tools = {
   async search_ticket({ query }) {
-    throw new Error("live call to https://tickets.example/search was not intercepted: " + query);
+    return httpJson("http://tickets.example/search?q=" + encodeURIComponent(query || ""));
   },
   async update_ticket({ id, status }) {
-    throw new Error("live call to https://tickets.example/tickets/" + id + " was not intercepted: " + status);
+    return httpJson("http://tickets.example/tickets/" + encodeURIComponent(id || ""), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status }),
+    });
   },
 };
 
