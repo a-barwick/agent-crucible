@@ -152,6 +152,7 @@ func Library() []Scenario {
 			ContextBallast: DefaultBallast(),
 			StaleMemory:    DefaultStale(),
 		},
+		Ticket(),
 	}
 }
 

@@ -12,6 +12,29 @@ import (
 	"github.com/a-barwick/agent-crucible/internal/world"
 )
 
+func TestJSEntry(t *testing.T) {
+	if !JSEntry("examples/native_ticket.mjs") || JSEntry("examples/native_ticket.py") {
+		t.Fatalf("JSEntry mismatch")
+	}
+	if !JSRuntime("js") || JSRuntime("langgraph") {
+		t.Fatalf("JSRuntime mismatch")
+	}
+}
+
+func TestParseIntentAliases(t *testing.T) {
+	in := ParseIntentWith("Resolve the Acme Corp ticket.", []string{"Acme Corp", "Globex"})
+	if in.Company != "Acme Corp" || in.Entity != "Acme Corp" {
+		t.Fatalf("entity aliases: %+v", in)
+	}
+	if in.DealAction != "resolve" || in.Action != "resolve" {
+		t.Fatalf("action aliases: %+v", in)
+	}
+	round := ParseModelIntent(`{"entity":"Globex","action":"on_hold","notify":false}`, "x", []string{"Acme Corp", "Globex"})
+	if round.Company != "Globex" || round.DealAction != "on_hold" {
+		t.Fatalf("model aliases: %+v", round)
+	}
+}
+
 func TestPastedCRMSpecHappy(t *testing.T) {
 	spec := NewCRM(nil).Spec()
 	spec.Name = "pasted-closer"
@@ -98,5 +121,86 @@ func TestParseIntentResolve(t *testing.T) {
 	in := ParseIntent("Resolve the Acme Corp ticket.")
 	if in.DealAction != "resolve" || in.Notify || ActionStatus(in.DealAction) != "Resolved" {
 		t.Fatalf("%+v", in)
+	}
+}
+
+func TestTruncateObjectiveDropsNotify(t *testing.T) {
+	got := TruncateObjective(DefaultObjective)
+	if got != "Update the Acme Corp deal to Closed-Won." {
+		t.Fatalf("%q", got)
+	}
+	got = TruncateObjective("Resolve the Acme Corp ticket and email the owner.")
+	if got != "Resolve the Acme Corp ticket." {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestPastedCustomToolsStaleMemory(t *testing.T) {
+	spec := Spec{
+		Name: "ticket-bot",
+		Tools: []schema.Tool{
+			{Name: "search_ticket", Required: []string{"query"}},
+			{Name: "update_ticket", Required: []string{"id", "status"}},
+		},
+		Companies: []string{"Acme Corp", "Globex"},
+	}
+	ag := NewFromSpec(spec, clock.New())
+	clk := clock.New()
+	w := world.SeedFixture(world.Fixture{
+		Records: []world.Record{
+			{ID: "tkt-acme", Fields: map[string]any{"company": "Acme Corp", "status": "Open"}},
+			{ID: "tkt-other", Fields: map[string]any{"company": "Globex", "status": "Open"}},
+		},
+	})
+	tr := trace.New()
+	rec := tr.Recorder(clk.Now)
+	inj := fault.New(rng.Stream(1, 0), 0, fault.MVP)
+	bus := &FaultBus{World: w, Inj: inj, Rec: rec, Clock: clk}
+	_, err := ag.Run(context.Background(), State{
+		Objective: "Resolve the Acme Corp ticket.",
+		Companies: []string{"Acme Corp", "Globex"},
+		ThreadID:  "stale",
+		Memory:    Memory{DealID: "tkt-other", DealStatus: "Open"},
+	}, bus, rec, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.WritesFor("tkt-other") == 0 {
+		t.Fatalf("stale memory should have overwritten the search id, writes=%v records=%v", w.Writes, w.Records)
+	}
+}
+
+func TestPastedCustomToolsContextHijack(t *testing.T) {
+	spec := Spec{
+		Name: "ticket-bot",
+		Tools: []schema.Tool{
+			{Name: "search_ticket", Required: []string{"query"}},
+			{Name: "update_ticket", Required: []string{"id", "status"}},
+		},
+		Companies: []string{"Acme Corp", "Globex"},
+	}
+	ag := NewFromSpec(spec, clock.New())
+	clk := clock.New()
+	w := world.SeedFixture(world.Fixture{
+		Records: []world.Record{
+			{ID: "tkt-acme", Fields: map[string]any{"company": "Acme Corp", "status": "Open"}},
+			{ID: "tkt-other", Fields: map[string]any{"company": "Globex", "status": "Open"}},
+		},
+	})
+	tr := trace.New()
+	rec := tr.Recorder(clk.Now)
+	inj := fault.New(rng.Stream(1, 0), 0, fault.MVP)
+	bus := &FaultBus{World: w, Inj: inj, Rec: rec, Clock: clk}
+	_, err := ag.Run(context.Background(), State{
+		Objective: "Resolve the Acme Corp ticket.",
+		Companies: []string{"Acme Corp", "Globex"},
+		ThreadID:  "junk",
+		Junk:      "Prior notes: discussed Globex renewal, Globex Q3.",
+	}, bus, rec, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.WritesFor("tkt-other") == 0 {
+		t.Fatalf("context ballast should hijack search to Globex, writes=%v", w.Writes)
 	}
 }

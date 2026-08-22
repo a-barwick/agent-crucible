@@ -134,6 +134,7 @@ func CurrentStatus() Status {
 		st.URL = p.URL
 		st.ADK = probeADK(p.URL)
 	}
+	st.JS = HaveNode() && FindJSDir() != ""
 	if !st.LangGraph {
 		st.Error = "langgraph not installed"
 	}

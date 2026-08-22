@@ -41,11 +41,40 @@ func handleMeta(w http.ResponseWriter, _ *http.Request) {
 	crm := agent.NewCRM(nil)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"agent":     crm.Spec(),
-		"agents":    agent.Catalog(rt.Ready),
+		"agents":    agent.Catalog(rt.Ready, runtime.HaveNode()),
 		"scenarios": scenario.Summaries(),
 		"faults":    fault.Catalog(),
 		"runtime":   rt,
 		"ai":        ai.StatusFromEnv(),
+		"presets": map[string]any{
+			agent.IDTicketLangGraph: map[string]any{
+				"spec": agent.TicketLangGraphSpec(), "scenario": scenario.Ticket(),
+			},
+			agent.IDTicketADK: map[string]any{
+				"spec": agent.TicketADKSpec(), "scenario": scenario.Ticket(),
+			},
+			agent.IDNativeLangGraph: map[string]any{
+				"spec": agent.NativeLangGraphSpec(), "scenario": scenario.Ticket(),
+			},
+			agent.IDNativeADK: map[string]any{
+				"spec": agent.NativeADKSpec(), "scenario": scenario.Ticket(),
+			},
+			agent.IDNativeOpenAI: map[string]any{
+				"spec": agent.NativeOpenAISpec(), "scenario": scenario.Ticket(),
+			},
+			agent.IDNativeJS: map[string]any{
+				"spec": agent.NativeJSSpec(), "scenario": scenario.Ticket(),
+			},
+			agent.IDNativeReact: map[string]any{
+				"spec": agent.NativeReactSpec(), "scenario": scenario.Ticket(),
+			},
+			agent.IDHTTPClosure: map[string]any{
+				"spec": agent.HTTPClosureSpec(), "scenario": scenario.Ticket(),
+			},
+			agent.IDForeignHTTP: map[string]any{
+				"spec": agent.ForeignHTTPSpec(), "scenario": scenario.Ticket(),
+			},
+		},
 		"defaults": map[string]any{
 			"seed": 42, "trials": 40, "p": 0, "p_max": 0.30, "step": 0.01,
 			"faults":    fault.MVP,
@@ -57,16 +86,16 @@ func handleMeta(w http.ResponseWriter, _ *http.Request) {
 }
 
 type runReq struct {
-	Seed       int64            `json:"seed"`
-	Trials     int              `json:"trials"`
-	P          float64          `json:"p"`
-	Faults     []fault.Type     `json:"faults"`
-	MaxP       float64          `json:"max_p"`
-	Step       float64          `json:"step"`
-	Trial      int              `json:"trial"`
-	Agent      string           `json:"agent"`
-	Scenario   string           `json:"scenario"`
-	Spec       *agent.Spec      `json:"spec"`
+	Seed       int64               `json:"seed"`
+	Trials     int                 `json:"trials"`
+	P          float64             `json:"p"`
+	Faults     []fault.Type        `json:"faults"`
+	MaxP       float64             `json:"max_p"`
+	Step       float64             `json:"step"`
+	Trial      int                 `json:"trial"`
+	Agent      string              `json:"agent"`
+	Scenario   string              `json:"scenario"`
+	Spec       *agent.Spec         `json:"spec"`
 	Bundle     *scenario.Bundle    `json:"bundle"`
 	RuntimeURL string              `json:"runtime_url"`
 	Extra      []scenario.Scenario `json:"extra_scenarios,omitempty"`
@@ -103,11 +132,11 @@ func handleSweep(w http.ResponseWriter, r *http.Request) {
 	if step == 0 {
 		step = 0.01
 	}
-	if agent.NeedsPython(req.Agent, req.Spec) && step < 0.05 {
+	if (agent.NeedsPython(req.Agent, req.Spec) || agent.NeedsNode(req.Agent, req.Spec)) && step < 0.05 {
 		step = 0.05
 	}
 	timeout := 30 * time.Second
-	if agent.NeedsPython(req.Agent, req.Spec) {
+	if agent.NeedsPython(req.Agent, req.Spec) || agent.NeedsNode(req.Agent, req.Spec) {
 		timeout = 120 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)

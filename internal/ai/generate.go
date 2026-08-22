@@ -173,12 +173,12 @@ func generateFromSchema(seed int64, tools []schema.Tool, n int) []Draft {
 	}
 
 	add(Draft{Source: "schema", Scenario: scenario.Scenario{
-		ID:          "gen-hold",
-		Name:        fmt.Sprintf("Hold the %s", tpl.noun),
-		Description: "User cancelled. Mark On-Hold and stay quiet.",
-		Objective:   fmt.Sprintf("Stop. Mark the %s %s On-Hold and do not email anyone.", companies[0], tpl.noun),
+		ID:           "gen-hold",
+		Name:         fmt.Sprintf("Hold the %s", tpl.noun),
+		Description:  "User cancelled. Mark On-Hold and stay quiet.",
+		Objective:    fmt.Sprintf("Stop. Mark the %s %s On-Hold and do not email anyone.", companies[0], tpl.noun),
 		AltObjective: fmt.Sprintf("Stop. Mark the %s %s On-Hold and do not email anyone.", companies[0], tpl.noun),
-		Companies:   companies,
+		Companies:    companies,
 		Expect: judge.Expect{
 			Objective:        fmt.Sprintf("Stop. Mark the %s %s On-Hold and do not email anyone.", companies[0], tpl.noun),
 			RecordID:         tpl.primaryID,

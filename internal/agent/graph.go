@@ -76,17 +76,19 @@ func (g *Graph) Run(ctx context.Context, st *State, bus Bus, rec *trace.Recorder
 	}
 	return Result{
 		Terminal: terminal,
-		Intent:   st.Intent,
+		Intent:   st.Intent.SyncAliases(),
 		Claimed:  claimOf(st),
 		Steps:    steps,
 	}, nil
 }
 
 func claimOf(st *State) Claim {
+	rid := st.TargetID()
 	return Claim{
 		Wrote:    st.Wrote,
 		Notified: st.Notified,
-		DealID:   st.DealID,
+		DealID:   rid,
+		RecordID: rid,
 		Status:   st.Status,
 		Error:    st.LastError,
 	}
@@ -138,7 +140,7 @@ func ParseIntentWith(objective string, companies []string) Intent {
 	} else if containsFold(objective, "email") {
 		in.Notify = true
 	}
-	return in
+	return in.SyncAliases()
 }
 
 // ParseModelIntent prefers planner JSON; missing notify stays false.
@@ -150,9 +152,11 @@ func ParseModelIntent(text, fallback string, companies []string) Intent {
 		}
 	}
 	var in Intent
-	if err := json.Unmarshal([]byte(text), &in); err == nil && (in.Company != "" || in.DealAction != "") {
+	if err := json.Unmarshal([]byte(text), &in); err == nil && (in.Company != "" || in.Entity != "" || in.DealAction != "" || in.Action != "") {
+		in = in.SyncAliases()
 		if in.Company == "" {
 			in.Company = ParseIntentWith(fallback, companies).Company
+			in = in.SyncAliases()
 		}
 		return in
 	}

@@ -7,7 +7,7 @@ decides node order and which tool name to callback.
 from typing import Any
 
 from . import patient
-from .intent import parse_model_intent
+from .intent import last_company, parse_model_intent
 
 CRM_TOOLS = {"lookup_contact", "get_deal", "write_deal", "send_email", "check_permission"}
 CRM_NODES = {"plan", "lookup", "fetch", "enrich", "authorize", "write", "notify", "end", "abort"}
@@ -147,7 +147,7 @@ def infer_args(state: dict, tool: str, spec: dict) -> dict:
             args[name] = v
     if is_write(tool):
         intent = state.get("intent") or {}
-        status = action_status(intent.get("deal_action") or "")
+        status = action_status(intent.get("action") or intent.get("deal_action") or "")
         if status and not args.get("status"):
             args["status"] = status
     return args
@@ -167,14 +167,14 @@ def default_arg_names(tool: str) -> list[str]:
 def arg_from_state(state: dict, name: str, kind: str):
     intent = state.get("intent") or {}
     if name in ("company", "query", "name", "title"):
-        return intent.get("company") or None
+        return intent.get("entity") or intent.get("company") or None
     if name in ("id", "record_id", "ticket_id", "deal_id"):
-        return state.get("deal_id") or None
+        return state.get("record_id") or state.get("deal_id") or None
     if name == "contact_id":
         return state.get("contact_id") or None
     if name == "status":
         if kind == "write":
-            s = action_status((intent.get("deal_action") or ""))
+            s = action_status((intent.get("action") or intent.get("deal_action") or ""))
             if s:
                 return s
         return state.get("status") or None
@@ -224,12 +224,12 @@ def apply_saves(state: dict, data: dict | None, save: dict | None) -> None:
 
 def state_value(state: dict, path: str):
     intent = state.get("intent") or {}
-    if path in ("intent.company", "company", "query", "name"):
-        return intent.get("company")
+    if path in ("intent.company", "intent.entity", "company", "entity", "query", "name"):
+        return intent.get("entity") or intent.get("company")
     if path == "contact_id":
         return state.get("contact_id")
     if path in ("deal_id", "id", "record_id", "ticket_id"):
-        return state.get("deal_id")
+        return state.get("record_id") or state.get("deal_id")
     if path == "ae":
         return state.get("ae")
     if path == "status":
@@ -280,6 +280,15 @@ def _tool(cb, state: dict, name: str, bind: dict, spec: dict) -> dict:
     args = infer_args(state, tool, spec)
     for arg, path in (bind.get("args_from") or {}).items():
         args[arg] = state_value(state, path)
+    if classify(tool) == "read" and state.get("junk"):
+        hijack = last_company(state.get("junk") or "", state.get("companies"))
+        intent = state.get("intent") or {}
+        if hijack and hijack != (intent.get("company") or ""):
+            for k in ("query", "company", "name", "title"):
+                if k in args:
+                    args[k] = hijack
+            if hasattr(cb, "state"):
+                cb.state("lookup hijacked by context ballast", {"company": hijack, "tool": tool})
     res = cb.retry_tool(tool, args)
     state["steps"] = int(state.get("steps") or 0) + 1
     if patient.transport(res):
@@ -288,12 +297,25 @@ def _tool(cb, state: dict, name: str, bind: dict, spec: dict) -> dict:
         return state
     d = patient.data(res)
     apply_saves(state, d, bind.get("save"))
+    mem = state.get("memory") or {}
+    mid = (mem.get("record_id") or mem.get("deal_id") or "") if classify(tool) == "read" else ""
+    if mid:
+        state["deal_id"] = mid
+        state["record_id"] = mid
+        if mem.get("deal_status"):
+            state["status"] = mem["deal_status"]
+        if hasattr(cb, "state"):
+            cb.state("enrich trusted stale memory", {"deal_id": mid, "record_id": mid, "tool": tool})
     if is_write(tool):
         # Same bug as the CRM write node: a non-timeout envelope is "done".
         state["wrote"] = True
         status = d.get("status") or args.get("status") or ""
         if status:
             state["status"] = status
+        if res.get("error") == "permission_denied" and hasattr(cb, "state"):
+            cb.state("write ignored permission_denied", {"tool": tool})
+        if res.get("ok") and not d and hasattr(cb, "state"):
+            cb.state("write accepted empty success payload", {"tool": tool})
     if is_email(tool):
         state["notified"] = bool(res.get("ok") or not res.get("error"))
     return state

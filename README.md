@@ -13,11 +13,19 @@ The AI is not the test runner. The runner is deterministic — seeded, replayabl
 | Agent id | Runtime | What it actually is |
 | --- | --- | --- |
 | `aether-closer` | in-process Go | Fast slider twin: nodes, `MemorySaver`, invoked planner |
-| `aether-closer-langgraph` | Python | Real `langgraph.StateGraph` compiled with `InMemorySaver`. Plan calls a LangChain chat model |
-| `aether-closer-adk` | Python | ADK adapter: `Agent` + `Runner` + `SessionService`. Tools callback into the chamber |
-| `pasted` | spec | Paste tool schemas + a graph JSON. Optional fixtures and expect |
+| `aether-closer-langgraph` | Python | Sample closer as a real `langgraph.StateGraph` + `InMemorySaver` |
+| `aether-closer-adk` | Python | Sample closer as ADK `Agent` + `Runner` + `SessionService` |
+| `ticket-langgraph` / `native-langgraph` | Python | **Unmodified LangGraph**: `examples/native_ticket.py`. `@tool` functions the chamber wraps. |
+| `ticket-adk` / `native-adk` | Python | **Unmodified ADK**: `examples/native_adk.py`. `FunctionTool` + `LlmAgent`. |
+| `native-openai` | Python | OpenAI tools: `chat.completions` schemas + `DISPATCH` |
+| `native-js` | Node | **Unmodified JS**: `examples/native_ticket.mjs`. Tools call `fetch`. |
+| `native-react` | Python | **Unmodified `create_react_agent`**. Tools call urllib. Scripted model. |
+| `http-closure` | Python | LangGraph nodes call urllib themselves. **No `@tool` objects.** |
+| `foreign-http` | wrap / entry | Foreign process (`examples/foreign_task.py`). No Callback, no `/v1/run`. |
+| `remote` | HTTP | Any process that speaks `POST /v1/run` (it may wrap an unmodified file) |
+| `pasted` | spec / entry | Paste schemas, or set `spec.entry` / `spec.endpoint` / `spec.command` |
 
-The chamber stays on this side of the tools. Sidecars never touch the world; they HTTP-callback into `FaultBus`.
+The chamber intercepts the I/O the agent actually uses. After import it patches `urllib` / `requests` / `httpx` / `simple_salesforce` / JS `fetch`, and wraps discovered `@tool` objects as a fallback. A graph that calls HTTP inside an ordinary closure is still fault-injected. The agent file does not import the world and does not call `cb.retry_tool`.
 
 ## Scenario library
 
@@ -28,6 +36,7 @@ Not one Acme close. Built-in tasks:
 - `renew-supplies` — other company, lookalike ballast
 - `refund-acme` — write Refunded, stay quiet
 - `close-quiet` — Closed-Won, do not email
+- `resolve-ticket` — search then update a ticket (drop-in agents default here)
 
 `crucible generate` (and the UI button) adds more from the tool schemas. With `OPENAI_API_KEY` / `CRUCIBLE_AI_API_KEY` a model writes extras; without it the local evaluator still produces the library.
 
@@ -38,15 +47,30 @@ python3 -m pip install -r runtime/requirements.txt   # LangGraph sidecar
 go run ./cmd/crucible serve -addr :8080
 ```
 
-Open http://localhost:8080. Drag *tool failure probability* from 0% to 30%. Switch agent to `aether-closer-langgraph` or paste a spec. The ensemble is fixed: raising `p` only adds faults.
+Open http://localhost:8080. Drag *tool failure probability* from 0% to 30%. Load *unmodified LangGraph* (a real file whose `@tool` functions would call HTTP) or paste a spec. The ensemble is fixed: raising `p` only adds faults.
 
 ```bash
 crucible run -seed 42 -trials 40 -p 0.3
+crucible run -agent ticket-langgraph -p 0.3 -faults all
+crucible run -entry examples/native_ticket.py
+crucible run -agent native-openai -p 0.3
+crucible run -agent native-js -p 0.3
+crucible run -agent native-react -p 0.3
+crucible run -agent http-closure -p 0.3
+crucible run -agent foreign-http -p 0.3
+crucible run -entry examples/native_ticket.py -spec examples/native_ticket.json
 crucible run -agent aether-closer-langgraph -scenario refund-acme -p 0.2
 crucible replay -seed 42 -trial 7 -p 0.3
 crucible agents
 crucible scenarios
 crucible generate -n 5
+```
+
+An arbitrary process that still loads an unmodified graph:
+
+```bash
+python3 examples/http_native.py --addr 127.0.0.1:8094
+crucible run -agent remote -endpoint http://127.0.0.1:8094 -spec examples/native_ticket.json
 ```
 
 ## Faults
@@ -57,7 +81,7 @@ crucible generate -n 5
 | `malformed` | 200-shaped payload, required fields gone | Validate before the next node |
 | `duplicate` | Same side effect delivered twice | Idempotency keys |
 | `stale_memory` | Last week's deal overwrites a fresh fetch | Invalidate memory on fetch |
-| `permission` | `write_deal` returns 403 | Hard-stop; never email a close |
+| `permission` | The write tool returns 403 | Hard-stop; never continue as if the write landed |
 | `partial_model` | Planner drops the email clause | Schema-check planner JSON |
 | `context_pressure` | Ballast hijacks lookup to a lookalike company | Pin the objective |
 | `cost_ceiling` | Budget trips at the midpoint | Abort and roll back claims |
@@ -69,8 +93,8 @@ The sample agent does none of those things on purpose. It is the patient.
 
 ```
 seed + trial  →  rng stream  →  fault decisions (u < p)
-                              →  agent (Go | LangGraph | ADK | pasted spec)
-                              →  tool callback → instrumented world
+                              →  agent (Go | LangGraph | ADK | create_react_agent | entry | wrap | HTTP process)
+                              →  HTTP/SDK or tool callback → instrumented world
                               →  rule judge (+ model if ambiguous)
                               →  clusters + evidence-based critique
 ```
@@ -88,19 +112,22 @@ Ambiguous traces (claimed success, world unfinished, no unsafe mutation) go to t
 
 ## Bring your own agent
 
-1. **Paste** a JSON bundle in the UI (`spec.tools`, optional `spec.graph` / `node_tools`, `scenario.fixtures`, `scenario.expect`).
-2. **Switch the agent** to `aether-closer-langgraph` or `aether-closer-adk` to compile that spec on the sidecar. The in-process `pasted` agent stays the fast Go twin. Set `spec.runtime` to `langgraph` / `adk` to force the sidecar from `pasted`.
-3. **Generate scenarios** from the pasted tools. Drafts carry `expect` + `fixtures` and actually run — they are not silent aliases for close-acme.
-4. **Implement** `agent.Agent` in-process, or **speak the protocol**: `POST /v1/run` with `{callback, token, objective, thread_id, spec}`. Call `POST {callback}/tool` and `POST {callback}/before_node`.
+1. **Drop a file.** `spec.entry` (or `-entry`) is a Python or Node module. Export `run(req)` (no callback), `build()`, `graph`, or the older `run(cb, req)`. The sidecar imports *your* graph, patches HTTP/SDK calls, and wraps discovered tools. See `examples/native_ticket.py`, `examples/native_react.py`, `examples/http_closure.py`.
+2. **Drop a process that does not know the chamber exists.** `spec.command` runs the file under `python3 -m crucible_rt.boot`, which installs the HTTP intercept and execs your script. See `examples/foreign_task.py`. Or `spec.endpoint` for any HTTP server that speaks `POST /v1/run`.
+3. **Point a tool-using client at the sidecar.** `POST /v1/chat/completions` is a deterministic OpenAI-compatible planner. Tool execution stays in the agent and still hits `httpio`.
+4. **Paste schemas** when you do not have a file yet (`spec.tools`, optional `spec.graph`). The chamber will compile a walk. That is a fallback, not “give it an agent.”
+5. **Generate scenarios** from the tools. Drafts carry `expect` + `fixtures` and actually run.
 
-The world is not CRM-only. Tool names in the spec are classified (`search_*` reads, `update_*` writes, `send_*` / `notify_*` emails, `*permission*` checks) and served from `fixtures.records`. Known CRM names still hit the sample tables. The judge scores `expect` — `record_id` / `status` / `writes` / `emails` / `record_fields` — not hardcoded Acme ids. Unknown scenario ids look in `extra_scenarios` / the bundle before falling back to the library.
+You do not rewrite the agent around `cb.retry_tool`. Define `@tool` / `FunctionTool` / OpenAI functions / JS `tools` as you would in production — they can call `requests` / `urllib` / `fetch`. After import the chamber intercepts those calls. Intent uses `entity` / `action` aliases so the planner is not stuck on `company` / `deal_action`.
 
-Tools without a graph become a linear walk after `plan`. CRM tool names without a custom graph still compile the sample closer. Anything else is compiled from the spec on Go, LangGraph, or ADK.
+The judge scores `expect` — `record_id` / `status` / `writes` / `emails` / `record_fields` — not hardcoded Acme ids. The full fault catalog (all nine) runs against the same task. Critique copy names the write tool that actually failed (`update_ticket`, not “the CRM tool”) when the spec is not the sample closer.
 
 ```json
 {
   "spec": {
     "name": "ticket-bot",
+    "runtime": "langgraph",
+    "entry": "examples/native_ticket.py",
     "tools": [
       {"name": "search_ticket", "required": ["query"]},
       {"name": "update_ticket", "required": ["id", "status"]}
@@ -126,15 +153,17 @@ Set `CRUCIBLE_RUNTIME` if the `runtime/` tree is not next to the binary. Planner
 cmd/crucible/          CLI + HTTP entry
 internal/harness/      seeded suite + sweep runner
 internal/fault/        injection, independent of p
-internal/agent/        interfaces, MemorySaver, planner, CRM + generic
-internal/runtime/      Python sidecar client + localhost tool callback
-internal/scenario/     task library
+internal/agent/        interfaces, MemorySaver, planner, CRM + generic + ticket spec
+internal/runtime/      Python sidecar client, entry resolver, localhost tool callback
+internal/scenario/     task library including resolve-ticket
 internal/ai/           generate / evaluate / explain
 internal/world/        CRM tables + generic records; Invoke from spec
 internal/judge/        expect-driven recovery rules
 internal/cluster/      failure fingerprints
 internal/critique/     critique types
 internal/server/       /api/meta /api/run /api/sweep /api/replay /api/generate
-runtime/crucible_rt/   LangGraph StateGraph + ADK adapter + generic spec compiler
+runtime/crucible_rt/   sidecar + HTTP/SDK intercept + OpenAI-compatible planner
+examples/              unmodified LangGraph / ADK / OpenAI / JS / react / foreign agents
+runtime/js/            Node sidecar that patches fetch and wraps tool exports
 web/                   timeline UI
 ```

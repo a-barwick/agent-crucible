@@ -33,7 +33,31 @@
     $("runtime-pill").textContent = rt.ready ? "runtime: up · langgraph" : "runtime: go only";
     $("ai-pill").textContent = "ai: " + ((state.meta.ai && state.meta.ai.provider) || "local");
     renderFaults();
-    drawGraph(state.meta.agent.graph.nodes, [], []);
+    drawGraph(graphNodes(), [], []);
+  }
+
+  function graphNodes() {
+    const spec = (state.bundle && state.bundle.spec) || (state.meta && state.meta.agent) || {};
+    const nodes = (spec.graph && spec.graph.nodes) || [];
+    return nodes.length ? nodes : (state.meta && state.meta.agent && state.meta.agent.graph && state.meta.agent.graph.nodes) || [];
+  }
+
+  function applyPreset(id, doSweep) {
+    const preset = state.meta && state.meta.presets && state.meta.presets[id];
+    if (!preset) return false;
+    state.bundle = { spec: preset.spec, scenario: preset.scenario || {} };
+    $("agent").value = id;
+    $("agent-name").textContent = (preset.spec && preset.spec.name) || id;
+    $("agent-fw").textContent = (preset.spec && preset.spec.framework) || "langgraph";
+    if (preset.scenario && preset.scenario.name) $("agent-task").textContent = preset.scenario.name;
+    for (const f of state.meta.faults || []) state.enabled.add(f.type);
+    renderFaults();
+    fillScenarios();
+    if (preset.scenario && (preset.scenario.id || preset.scenario.objective)) {
+      $("scenario").value = preset.scenario.id || "pasted";
+    }
+    if (doSweep !== false) sweep();
+    return true;
   }
 
   function fillSelect(sel, items, valueKey, labelKey, current) {
@@ -207,8 +231,7 @@
         if (ev.tool) faulted.add(ev.tool);
       }
     }
-    const nodes = state.meta?.agent?.graph?.nodes || [];
-    drawGraph(nodes, hit, faulted);
+    drawGraph(graphNodes(), hit, faulted);
 
     const tl = $("timeline");
     tl.innerHTML = (trial.events || [])
@@ -283,15 +306,39 @@
   $("seed").addEventListener("change", sweep);
   $("trials").addEventListener("change", sweep);
   $("agent").addEventListener("change", () => {
-    const info = (state.meta.agents || []).find((a) => a.id === $("agent").value);
+    const id = $("agent").value;
+    if (applyPreset(id, false)) {
+      sweep();
+      return;
+    }
+    const info = (state.meta.agents || []).find((a) => a.id === id);
     if (info) {
       $("agent-name").textContent = info.name;
       $("agent-fw").textContent = info.framework;
     }
-    const keep = new Set(["pasted", "aether-closer-langgraph", "aether-closer-adk"]);
-    if (!keep.has($("agent").value)) state.bundle = null;
+    const keep = new Set([
+      "pasted",
+      "aether-closer-langgraph",
+      "aether-closer-adk",
+      "ticket-langgraph",
+      "ticket-adk",
+      "native-langgraph",
+      "native-adk",
+      "native-openai",
+      "native-js",
+      "native-react",
+      "http-closure",
+      "foreign-http",
+    ]);
+    if (!keep.has(id)) state.bundle = null;
     sweep();
   });
+  $("load-ticket-lg").addEventListener("click", () => applyPreset("ticket-langgraph", true));
+  $("load-ticket-adk").addEventListener("click", () => applyPreset("ticket-adk", true));
+  $("load-native-openai").addEventListener("click", () => applyPreset("native-openai", true));
+  $("load-native-js").addEventListener("click", () => applyPreset("native-js", true));
+  $("load-native-react").addEventListener("click", () => applyPreset("native-react", true));
+  $("load-http-closure").addEventListener("click", () => applyPreset("http-closure", true));
   $("scenario").addEventListener("change", () => {
     const extra = selectedExtra();
     if (extra) {

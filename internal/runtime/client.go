@@ -15,6 +15,16 @@ import (
 	"github.com/a-barwick/agent-crucible/internal/trace"
 )
 
+func jsOpts(opts RemoteOpts) bool {
+	if opts.Kind == "js" || opts.Kind == "javascript" || opts.Kind == "node" {
+		return true
+	}
+	if opts.Spec != nil && (agent.JSRuntime(opts.Spec.Runtime) || agent.JSEntry(opts.Spec.Entry)) {
+		return true
+	}
+	return false
+}
+
 type RemoteOpts struct {
 	Kind string // langgraph | adk
 	URL  string
@@ -31,14 +41,32 @@ type Remote struct {
 
 func NewRemote(ctx context.Context, opts RemoteOpts) (*Remote, error) {
 	url := opts.URL
+	if url == "" && opts.Spec != nil {
+		url = opts.Spec.Endpoint
+	}
+	js := jsOpts(opts)
 	if url == "" {
-		p, err := EnsureLocal(ctx)
-		if err != nil {
-			return nil, err
+		if js {
+			p, err := EnsureNode(ctx)
+			if err != nil {
+				return nil, err
+			}
+			url = p.URL
+		} else {
+			p, err := EnsureLocal(ctx)
+			if err != nil {
+				return nil, err
+			}
+			url = p.URL
 		}
-		url = p.URL
 	}
 	kind := opts.Kind
+	if kind == "" && opts.Spec != nil {
+		kind = opts.Spec.Runtime
+	}
+	if js {
+		kind = "js"
+	}
 	if kind == "" {
 		kind = "langgraph"
 	}
@@ -91,6 +119,13 @@ func (r *Remote) Run(ctx context.Context, st agent.State, bus agent.Bus, rec *tr
 		Spec:      r.SpecIn,
 		Callback:  cb.URL(),
 		Token:     tok,
+	}
+	if r.SpecIn != nil {
+		req.Entry = r.SpecIn.Entry
+		req.Export = r.SpecIn.Export
+		if req.Runtime == "" && r.SpecIn.Runtime != "" {
+			req.Runtime = r.SpecIn.Runtime
+		}
 	}
 	raw, err := json.Marshal(req)
 	if err != nil {

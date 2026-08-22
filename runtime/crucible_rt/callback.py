@@ -36,3 +36,6 @@ class Callback:
         if (res.get("error") or "") == "timeout":
             res = self.tool(name, args)
         return res
+
+    def state(self, message: str, data: dict | None = None) -> dict:
+        return self._post("/state", {"message": message, "data": data or {}})

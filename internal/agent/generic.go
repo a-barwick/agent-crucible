@@ -67,7 +67,7 @@ func (a *Generic) Run(ctx context.Context, st State, bus Bus, rec *trace.Recorde
 	if st.ThreadID == "" {
 		st.ThreadID = "pasted"
 	}
-	if st.Intent.Company == "" && st.Objective != "" {
+	if st.Intent.EntityName() == "" && st.Objective != "" {
 		st.Intent = ParseIntentWith(st.Objective, st.Companies)
 	}
 	nodes := map[string]NodeFunc{}
@@ -150,6 +150,7 @@ func (a *Generic) toolNode(name string, bind NodeBinding) NodeFunc {
 		for arg, path := range bind.ArgsFrom {
 			args[arg] = stateValue(st, path)
 		}
+		hijackReadArgs(st, bind.Tool, args, rec)
 		res, err := callRetry(ctx, bus, rec, bind.Tool, args)
 		if err != nil {
 			return "abort", err
@@ -159,6 +160,7 @@ func (a *Generic) toolNode(name string, bind NodeBinding) NodeFunc {
 			return "abort", nil
 		}
 		applySaves(st, res.Data, bind.Save)
+		overwriteFromMemory(st, bind.Tool, rec)
 		if schema.IsWriteLike(bind.Tool) {
 			// Same bug as the CRM write node: a non-timeout envelope is "done".
 			st.Wrote = true
@@ -167,12 +169,60 @@ func (a *Generic) toolNode(name string, bind NodeBinding) NodeFunc {
 			} else if s := schema.StringField(args, "status"); s != "" {
 				st.Status = s
 			}
+			if res.Error == "permission_denied" {
+				rec.State("write ignored permission_denied", map[string]any{"tool": bind.Tool})
+			}
+			if res.OK && (res.Data == nil || len(res.Data) == 0) {
+				rec.State("write accepted empty success payload", map[string]any{"tool": bind.Tool})
+			}
 		}
 		if schema.IsEmailLike(bind.Tool) {
 			st.Notified = res.OK || res.Error == ""
 		}
 		return nextFrom(a.spec.Graph, name), nil
 	}
+}
+
+func hijackReadArgs(st *State, tool string, args map[string]any, rec *trace.Recorder) {
+	if schema.IsWriteLike(tool) || schema.IsEmailLike(tool) || schema.IsPermissionLike(tool) {
+		return
+	}
+	if st.Junk == "" {
+		return
+	}
+	hijack := lastCompany(st.Junk, st.Companies)
+	if hijack == "" || hijack == st.Intent.EntityName() {
+		return
+	}
+	changed := false
+	for _, k := range []string{"query", "company", "name", "title"} {
+		if _, ok := args[k]; ok {
+			args[k] = hijack
+			changed = true
+		}
+	}
+	if changed {
+		rec.State("lookup hijacked by context ballast", map[string]any{"company": hijack, "tool": tool})
+	}
+}
+
+func overwriteFromMemory(st *State, tool string, rec *trace.Recorder) {
+	if schema.IsWriteLike(tool) || schema.IsEmailLike(tool) || schema.IsPermissionLike(tool) {
+		return
+	}
+	id := st.Memory.TargetID()
+	if id == "" {
+		return
+	}
+	st.DealID = id
+	st.RecordID = id
+	if st.Memory.DealStatus != "" {
+		st.Status = st.Memory.DealStatus
+	}
+	if st.Memory.Amount != 0 {
+		st.Amount = st.Memory.Amount
+	}
+	rec.State("enrich trusted stale memory", map[string]any{"deal_id": st.DealID, "record_id": id, "tool": tool})
 }
 
 func inferBind(name string, spec Spec) NodeBinding {
@@ -221,7 +271,7 @@ func inferArgs(st *State, tool string, spec Spec) map[string]any {
 		}
 	}
 	if schema.IsWriteLike(tool) {
-		if s := ActionStatus(st.Intent.DealAction); s != "" {
+		if s := ActionStatus(st.Intent.ActionName()); s != "" {
 			if _, exists := args["status"]; !exists || schema.StringField(args, "status") == "" {
 				args["status"] = s
 			}
@@ -245,13 +295,13 @@ func defaultArgNames(tool string) []string {
 
 func argFromState(st *State, name string, kind schema.Kind) (any, bool) {
 	switch name {
-	case "company", "query", "name", "title":
-		if st.Intent.Company != "" {
-			return st.Intent.Company, true
+	case "company", "query", "name", "title", "entity":
+		if st.Intent.EntityName() != "" {
+			return st.Intent.EntityName(), true
 		}
 	case "id", "record_id", "ticket_id", "deal_id":
-		if st.DealID != "" {
-			return st.DealID, true
+		if id := st.TargetID(); id != "" {
+			return id, true
 		}
 	case "contact_id":
 		if st.ContactID != "" {
@@ -259,7 +309,7 @@ func argFromState(st *State, name string, kind schema.Kind) (any, bool) {
 		}
 	case "status":
 		if kind == schema.KindWrite {
-			if s := ActionStatus(st.Intent.DealAction); s != "" {
+			if s := ActionStatus(st.Intent.ActionName()); s != "" {
 				return s, true
 			}
 		}
@@ -283,7 +333,7 @@ func argFromState(st *State, name string, kind schema.Kind) (any, bool) {
 			return st.CloseDate, true
 		}
 	case "subject":
-		return "update: " + st.Intent.Company, true
+		return "update: " + st.Intent.EntityName(), true
 	case "body", "text":
 		return "deal=" + st.DealID + " status=" + st.Status, true
 	}
@@ -314,12 +364,12 @@ func applySaves(st *State, data map[string]any, save map[string]string) {
 
 func stateValue(st *State, path string) any {
 	switch path {
-	case "intent.company", "company", "query", "name":
-		return st.Intent.Company
+	case "intent.company", "intent.entity", "company", "entity", "query", "name":
+		return st.Intent.EntityName()
 	case "contact_id":
 		return st.ContactID
 	case "deal_id", "id", "record_id", "ticket_id":
-		return st.DealID
+		return st.TargetID()
 	case "ae":
 		return st.AE
 	case "status":
@@ -343,6 +393,7 @@ func setState(st *State, field, val string) {
 		st.AE = val
 	case "deal_id", "id", "record_id", "ticket_id":
 		st.DealID = val
+		st.RecordID = val
 	case "status":
 		st.Status = val
 	case "owner_id":

@@ -22,6 +22,9 @@ func TestLibraryHasFive(t *testing.T) {
 	if _, ok := Lookup(""); ok {
 		t.Fatal("empty id is not a hit")
 	}
+	if Get(TicketID).Expect.RecordID != "tkt-acme" {
+		t.Fatal("ticket expect is record-shaped")
+	}
 }
 
 func TestWorldIsolated(t *testing.T) {
