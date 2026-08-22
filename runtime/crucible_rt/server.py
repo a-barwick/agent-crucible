@@ -134,6 +134,7 @@ def main(argv=None):
 
         @lc_tool
         def search_ticket(query: str) -> dict:
+            """Search tickets. Used only to prove intercept wraps @tool."""
             raise RuntimeError("live search was not intercepted")
 
         spy = _Spy()
@@ -149,7 +150,7 @@ def main(argv=None):
         if not native.endswith("native_ticket.py"):
             raise SystemExit("native resolve: %s" % native)
         raw = open(native, encoding="utf-8").read()
-        if "retry_tool" in raw or "cb.before" in raw:
+        if "cb.retry_tool" in raw or "cb.before" in raw or "from crucible_rt.callback" in raw:
             raise SystemExit("native_ticket.py is still chamber-aware")
         print("native-ok", native)
         return

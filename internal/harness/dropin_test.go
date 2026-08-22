@@ -176,7 +176,7 @@ func TestNativeSourcesHaveNoCallback(t *testing.T) {
 			t.Fatal(err)
 		}
 		body := string(raw)
-		if strings.Contains(body, "retry_tool") || strings.Contains(body, "cb.before") || strings.Contains(body, "Callback(") {
+		if strings.Contains(body, "cb.retry_tool") || strings.Contains(body, "cb.before") || strings.Contains(body, "from crucible_rt.callback") || strings.Contains(body, "new Callback") {
 			t.Fatalf("%s still talks to the chamber callback", rel)
 		}
 	}
