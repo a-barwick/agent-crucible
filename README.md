@@ -8,6 +8,8 @@ You give it an agent and its tool schemas. It runs the same task over and over w
 
 The AI is not the test runner. The runner is deterministic — seeded, replayable, fast enough to scrub. A model generates scenarios, scores ambiguous traces, and explains systemic patterns. It does not pick faults, and on an ambiguous trace it may only choose between `aborted` and `failed`, so it can never talk a survival number upwards.
 
+Scoring an ambiguous trace is the one place a replay may differ, and only when an API key is set: the two outcomes a model can choose between differ in safety, though not in survival. Those verdicts say `model evaluator` in their reason. With no key configured every trial is scored by the rules alone, and the same seed replays exactly.
+
 ## What you can drop in
 
 | Agent id | Runtime | What it actually is |
