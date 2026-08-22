@@ -8,7 +8,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/a-barwick/agent-crucible/internal/agent"
@@ -85,6 +87,18 @@ func serveCmd(args []string) {
 	}
 	h := server.New()
 	s := &http.Server{Addr: *addr, Handler: h, ReadHeaderTimeout: 5 * time.Second}
+	// Ctrl-C is how this command normally ends, and a signal does not run
+	// deferred functions. Without this the StopAll above never happens and the
+	// sidecars are left behind on their ports.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		fmt.Fprintln(os.Stderr, "\nshutting down")
+		down, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.Shutdown(down)
+	}()
 	fmt.Fprintf(os.Stderr, "crucible listening on %s\n", *addr)
 	if err := s.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintln(os.Stderr, err)
