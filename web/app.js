@@ -9,7 +9,31 @@
     enabled: new Set(),
     bundle: null,
     extraScenarios: [],
+    // inflight is the sweep currently being poured. Every control re-sweeps, so
+    // dragging the agent picker used to leave several requests racing and the
+    // last reply to land won, which is not the same as the last one asked for.
+    inflight: null,
+    pending: false,
   };
+
+  // num reads a numeric input without treating 0 as "unset". `Number(v) || d`
+  // silently rewrote seed 0 to 42, so the one seed a user is most likely to
+  // type first was the one seed they could not run.
+  function num(id, fallback) {
+    const raw = ($(id) && $(id).value || "").trim();
+    if (raw === "") return fallback;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : fallback;
+  }
+
+  function seedValue() {
+    return num("seed", 42);
+  }
+
+  function trialCount() {
+    const n = num("trials", 40);
+    return n > 0 ? n : 40;
+  }
 
   const heatWord = (p) => {
     if (p <= 0) return "cold";
@@ -20,20 +44,38 @@
   };
 
   async function loadMeta() {
-    const res = await fetch("/api/meta");
-    state.meta = await res.json();
+    state.meta = await getJSON("/api/meta");
     $("agent-name").textContent = state.meta.agent.name;
     $("agent-fw").textContent = state.meta.agent.framework || "langgraph-go";
-    $("agent-task").textContent = "Close Acme · email the AE";
     const defaults = state.meta.defaults.faults || [];
     state.enabled = new Set(defaults);
     fillSelect($("agent"), state.meta.agents || [], "id", "id", state.meta.defaults.agent);
     fillScenarios();
-    const rt = state.meta.runtime || {};
-    $("runtime-pill").textContent = rt.ready ? "runtime: up · langgraph" : "runtime: go only";
+    $("agent-task").textContent = scenarioLabel($("scenario").value) || "—";
+    $("runtime-pill").textContent = runtimeLabel(state.meta.runtime || {});
     $("ai-pill").textContent = "ai: " + ((state.meta.ai && state.meta.ai.provider) || "local");
     renderFaults();
-    drawGraph(graphNodes(), [], []);
+    drawGraph(graphNodes(), new Set(), new Set());
+  }
+
+  // runtimeLabel says which sidecars are actually up. The old copy claimed
+  // "up · langgraph" whenever any sidecar answered, including when langgraph
+  // was the one thing missing.
+  function runtimeLabel(rt) {
+    const up = [];
+    if (rt.ready && rt.langgraph) up.push("langgraph");
+    if (rt.ready && rt.adk) up.push("adk");
+    if (rt.js) up.push("node");
+    return up.length ? "runtime: " + up.join(" + ") : "runtime: go only";
+  }
+
+  async function getJSON(url, init) {
+    const res = await fetch(url, init);
+    if (!res.ok) {
+      const body = (await res.text().catch(() => "")).trim();
+      throw new Error(`${res.status} ${res.statusText}${body ? ": " + body.slice(0, 300) : ""}`);
+    }
+    return res.json();
   }
 
   function graphNodes() {
@@ -108,6 +150,14 @@
     return (state.extraScenarios || []).find((s) => s.id === id) || null;
   }
 
+  function scenarioLabel(id) {
+    const pasted = state.bundle && state.bundle.scenario;
+    if (pasted && (pasted.id || "pasted") === id) return pasted.name || "Pasted scenario";
+    const items = [...(state.meta.scenarios || []), ...extraItems()];
+    const sc = items.find((s) => s.id === id);
+    return sc ? sc.name : "";
+  }
+
   function renderFaults() {
     const row = $("fault-row");
     row.innerHTML = "";
@@ -131,11 +181,12 @@
   }
 
   function currentSuite() {
-    if (!state.sweep) return null;
+    const suites = (state.sweep && state.sweep.suites) || [];
+    if (!suites.length) return null;
     const want = Math.round(state.p);
-    let best = state.sweep.suites[0];
+    let best = suites[0];
     let dist = 99;
-    for (const s of state.sweep.suites) {
+    for (const s of suites) {
       const sp = Math.round((s.config.p || 0) * 100);
       const d = Math.abs(sp - want);
       if (d < dist) {
@@ -149,37 +200,57 @@
   function renderSuite() {
     const suite = currentSuite();
     if (!suite) return;
-    const pct = Math.round(suite.survival * 100);
+    // Survival is over the trials that produced a verdict. A suite where the
+    // sidecar never started has no verdicts at all, and reading that as 0%
+    // survival blames the agent for a missing interpreter.
+    const trials = suite.trials || [];
+    const scored = suite.scored ?? trials.length;
+    const errored = suite.errored || 0;
     const el = $("survival");
-    el.textContent = pct + "%";
-    el.className = "giant " + (pct >= 70 ? "" : pct >= 40 ? "hot" : "dead");
-    $("survival-sub").textContent =
-      `${suite.trials.length} trials · seed ${suite.config.seed} · p=${Math.round(suite.config.p * 100)}%`;
+    if (scored === 0) {
+      el.textContent = "—";
+      el.className = "giant";
+      $("survival-sub").textContent = suite.error
+        ? "no trial ran: " + suite.error
+        : "no trial produced a verdict";
+    } else {
+      const pct = Math.round(suite.survival * 100);
+      el.textContent = pct + "%";
+      el.className = "giant " + (pct >= 70 ? "" : pct >= 40 ? "hot" : "dead");
+      $("survival-sub").textContent =
+        `${scored} scored · seed ${suite.config.seed} · p=${Math.round(suite.config.p * 100)}%` +
+        (errored ? ` · ${errored} could not run` : "");
+    }
+    const counts = suite.counts || {};
     const order = ["completed", "recovered", "aborted", "failed"];
     $("counts").innerHTML = order
-      .map((k) => {
-        const n = suite.counts[k] || 0;
-        return `<li><span><i class="dot ${k}"></i> ${k}</span><span>${n}</span></li>`;
-      })
+      .map((k) => `<li><span><i class="dot ${k}"></i> ${k}</span><span>${counts[k] || 0}</span></li>`)
       .join("");
 
     const tiles = $("tiles");
     tiles.innerHTML = "";
-    suite.trials.forEach((t) => {
+    trials.forEach((t) => {
       const b = document.createElement("button");
-      b.className = "tile " + t.outcome + (t.n === state.selected ? " sel" : "");
-      b.title = `trial ${t.n}: ${t.outcome}${t.faults?.length ? " · " + t.faults.join("+") : ""}`;
+      const outcome = t.error ? "errored" : t.outcome;
+      b.className = "tile " + outcome + (t.n === state.selected ? " sel" : "");
+      const label = `trial ${t.n}: ${outcome}${t.faults?.length ? " · " + t.faults.join("+") : ""}`;
+      b.title = label;
+      // The tiles have no text, so without a label they are forty buttons a
+      // screen reader announces as "button".
+      b.setAttribute("aria-label", label);
+      b.setAttribute("aria-pressed", String(t.n === state.selected));
       b.addEventListener("click", () => {
         state.selected = t.n;
         renderSuite();
       });
       tiles.append(b);
     });
+    $("tile-caption").textContent = trials.length ? `trial 0–${trials[trials.length - 1].n}` : "no trials";
 
     const curve = $("curve");
     if (curve && state.sweep) {
       const want = Math.round(state.p);
-      curve.innerHTML = state.sweep.suites
+      curve.innerHTML = (state.sweep.suites || [])
         .map((s) => {
           const sp = Math.round((s.config.p || 0) * 100);
           const h = Math.max(2, Math.round((s.survival || 0) * 48));
@@ -189,10 +260,11 @@
         .join("");
     }
 
-    $("clusters").innerHTML = suite.clusters
+    $("clusters").innerHTML = (suite.clusters || [])
       .slice(0, 8)
       .map((c) => {
-        return `<li data-sample="${c.sample_trial}"><span>${esc(c.id)}</span><span>${c.n} · ${Math.round(c.rate * 100)}%</span></li>`;
+        const n = Number(c.sample_trial) || 0;
+        return `<li data-sample="${n}"><span>${esc(c.id)}</span><span>${c.n} · ${Math.round(c.rate * 100)}%</span></li>`;
       })
       .join("");
     $("clusters").querySelectorAll("li").forEach((li) => {
@@ -202,14 +274,14 @@
       });
     });
 
-    const c = suite.critique;
-    $("headline").textContent = c.headline;
+    const c = suite.critique || {};
+    $("headline").textContent = suite.error && scored === 0 ? "Chamber error: " + suite.error : c.headline || "";
     $("paragraphs").innerHTML = (c.paragraphs || []).map((p) => `<p>${esc(p)}</p>`).join("");
     $("fixes").innerHTML = (c.fixes || [])
       .map((f) => `<li><code>${esc(f.node)}</code> — ${esc(f.advice)}</li>`)
       .join("");
 
-    const trial = suite.trials.find((t) => t.n === state.selected) || suite.trials[0];
+    const trial = trials.find((t) => t.n === state.selected) || trials[0];
     if (trial) renderTrial(suite, trial);
 
     const heat = Math.min(1, state.p / 30);
@@ -217,10 +289,9 @@
   }
 
   function renderTrial(suite, trial) {
-    $("tl-title").textContent = `Trial ${trial.n} · ${trial.outcome}`;
+    $("tl-title").textContent = `Trial ${trial.n} · ${trial.error ? "chamber error" : trial.outcome}`;
     $("tl-reason").textContent = trial.reason;
-    $("replay-cmd").textContent =
-      `crucible replay -seed ${suite.config.seed} -trial ${trial.n} -p ${suite.config.p}`;
+    $("replay-cmd").textContent = replayCmd(suite, trial);
 
     const hit = new Set();
     const faulted = new Set();
@@ -234,29 +305,63 @@
     drawGraph(graphNodes(), hit, faulted);
 
     const tl = $("timeline");
-    tl.innerHTML = (trial.events || [])
-      .map((ev) => {
-        const cls = ev.kind === "fault" ? "fault" : ev.kind;
-        return `<li class="${cls}"><span>${ev.tick}</span><span class="kind">${esc(ev.kind)}</span><span>${esc(ev.message)}</span></li>`;
-      })
-      .join("");
+    tl.innerHTML = "";
+    for (const ev of trial.events || []) {
+      const li = document.createElement("li");
+      li.className = String(ev.kind || "").replace(/[^a-z_-]/gi, "");
+      li.append(span(String(ev.tick ?? "")), span(String(ev.kind ?? ""), "kind"), span(String(ev.message ?? "")));
+      tl.append(li);
+    }
   }
 
+  function span(text, cls) {
+    const el = document.createElement("span");
+    if (cls) el.className = cls;
+    el.textContent = text;
+    return el;
+  }
+
+  // replayCmd has to name the agent, scenario and fault set, not just the seed.
+  // A bare `-seed 42 -trial 0` replays the built-in closer against the default
+  // scenario, which is a different run from the one on screen.
+  function replayCmd(suite, trial) {
+    const cfg = suite.config || {};
+    const parts = ["crucible", "replay", "-seed", String(cfg.seed ?? 0)];
+    parts.push("-trials", String((suite.trials || []).length || cfg.trials || 40));
+    parts.push("-trial", String(trial.n), "-p", String(cfg.p ?? 0));
+    if (cfg.agent) parts.push("-agent", sh(cfg.agent));
+    if (cfg.scenario) parts.push("-scenario", sh(cfg.scenario));
+    if ((cfg.faults || []).length) parts.push("-faults", sh(cfg.faults.join(",")));
+    const spec = (state.bundle && state.bundle.spec) || cfg.spec;
+    if (spec && spec.entry) parts.push("-entry", sh(spec.entry));
+    else if (spec && spec.endpoint) parts.push("-endpoint", sh(spec.endpoint));
+    return parts.join(" ");
+  }
+
+  function sh(s) {
+    return /^[A-Za-z0-9_,.:\/=+@-]+$/.test(s) ? s : "'" + String(s).replaceAll("'", "'\\''") + "'";
+  }
+
+  // drawGraph builds nodes through the DOM. Node names come from a pasted spec,
+  // so interpolating them into markup let a spec ship script into the page.
   function drawGraph(nodes, hit, faulted) {
-    $("graph").innerHTML = nodes
-      .filter((n) => n !== "end" && n !== "abort")
-      .map((n) => {
-        const cls = faulted.has(n) ? "faulted" : hit.has(n) ? "hit" : "";
-        return `<li class="${cls}">${n}</li>`;
-      })
-      .join("");
+    const g = $("graph");
+    g.innerHTML = "";
+    for (const n of nodes) {
+      if (n === "end" || n === "abort") continue;
+      const li = document.createElement("li");
+      if (faulted.has(n)) li.className = "faulted";
+      else if (hit.has(n)) li.className = "hit";
+      li.textContent = n;
+      g.append(li);
+    }
   }
 
   function payload() {
     const extra = selectedExtra();
     const body = {
-      seed: Number($("seed").value) || 42,
-      trials: Number($("trials").value) || 40,
+      seed: seedValue(),
+      trials: trialCount(),
       faults: [...state.enabled],
       max_p: 0.3,
       step: 0.01,
@@ -275,16 +380,41 @@
     return body;
   }
 
+  // sweep runs one pour at a time. A drop-in sweep can take a minute, and every
+  // control calls this, so without the guard the reply from an abandoned
+  // configuration could overwrite the one the user is looking at. A request
+  // arriving mid-pour is remembered, not dropped: the last configuration asked
+  // for is the one that ends up on screen.
   async function sweep() {
+    if (state.inflight) {
+      state.pending = true;
+      return state.inflight;
+    }
     $("survival-sub").textContent = "pouring…";
-    const res = await fetch("/api/sweep", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload()),
-    });
-    state.sweep = await res.json();
-    if (state.selected >= (Number($("trials").value) || 40)) state.selected = 0;
-    renderSuite();
+    const run = (async () => {
+      try {
+        state.sweep = await getJSON("/api/sweep", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload()),
+        });
+        if (state.selected >= trialCount()) state.selected = 0;
+        renderSuite();
+      } catch (err) {
+        state.sweep = null;
+        $("survival").textContent = "—";
+        $("survival").className = "giant";
+        $("survival-sub").textContent = "the pour failed";
+        $("headline").textContent = "Could not reach the runner: " + err.message;
+      }
+    })();
+    state.inflight = run;
+    await run;
+    state.inflight = null;
+    if (state.pending) {
+      state.pending = false;
+      return sweep();
+    }
   }
 
   function onSlider() {
@@ -294,11 +424,15 @@
     renderSuite();
   }
 
+  // esc escapes quotes as well as angle brackets: some of these strings land in
+  // attribute position, where a bare quote is enough to break out.
   function esc(s) {
     return String(s ?? "")
       .replaceAll("&", "&amp;")
       .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;");
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
   }
 
   $("p-slider").addEventListener("input", onSlider);
@@ -340,15 +474,8 @@
   $("load-native-react").addEventListener("click", () => applyPreset("native-react", true));
   $("load-http-closure").addEventListener("click", () => applyPreset("http-closure", true));
   $("scenario").addEventListener("change", () => {
-    const extra = selectedExtra();
-    if (extra) {
-      $("agent-task").textContent = extra.name;
-      sweep();
-      return;
-    }
-    const items = [...(state.meta.scenarios || []), ...extraItems()];
-    const sc = items.find((s) => s.id === $("scenario").value);
-    if (sc) $("agent-task").textContent = sc.name;
+    const label = scenarioLabel($("scenario").value);
+    if (label) $("agent-task").textContent = label;
     sweep();
   });
   $("paste-toggle").addEventListener("click", () => {
@@ -378,16 +505,15 @@
   $("gen-scenarios").addEventListener("click", async () => {
     $("gen-scenarios").disabled = true;
     try {
-      const res = await fetch("/api/generate", {
+      const drafts = await getJSON("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          seed: Number($("seed").value) || 42,
+          seed: seedValue(),
           n: 5,
           tools: (state.bundle && state.bundle.spec && state.bundle.spec.tools) || [],
         }),
       });
-      const drafts = await res.json();
       state.extraScenarios = drafts || [];
       fillScenarios();
       if (state.extraScenarios.length) {
@@ -395,7 +521,9 @@
         const sc = state.extraScenarios[0];
         if (sc && sc.name) $("agent-task").textContent = sc.name;
       }
-      sweep();
+      await sweep();
+    } catch (err) {
+      $("paste-hint").textContent = "Could not generate scenarios: " + err.message;
     } finally {
       $("gen-scenarios").disabled = false;
     }
@@ -403,5 +531,6 @@
 
   loadMeta().then(sweep).catch((err) => {
     $("headline").textContent = "Could not reach the runner: " + err.message;
+    $("survival-sub").textContent = "no runner";
   });
 })();

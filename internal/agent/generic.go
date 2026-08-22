@@ -131,7 +131,7 @@ func (a *Generic) remap(name string, fn NodeFunc) NodeFunc {
 		if a.hasNode(next) {
 			return next, nil
 		}
-		return nextFrom(a.spec.Graph, name), nil
+		return nextFrom(a.spec.Graph, name, rec), nil
 	}
 }
 
@@ -179,7 +179,7 @@ func (a *Generic) toolNode(name string, bind NodeBinding) NodeFunc {
 		if schema.IsEmailLike(bind.Tool) {
 			st.Notified = res.OK || res.Error == ""
 		}
-		return nextFrom(a.spec.Graph, name), nil
+		return nextFrom(a.spec.Graph, name, rec), nil
 	}
 }
 
@@ -206,6 +206,10 @@ func hijackReadArgs(st *State, tool string, args map[string]any, rec *trace.Reco
 	}
 }
 
+// overwriteFromMemory is the stale-memory bug in the generic runner: a populated
+// checkpoint beats whatever the read just returned. It only logs when it changed
+// something, so a graph with four read nodes reports one stale-memory event
+// rather than four identical ones.
 func overwriteFromMemory(st *State, tool string, rec *trace.Recorder) {
 	if schema.IsWriteLike(tool) || schema.IsEmailLike(tool) || schema.IsPermissionLike(tool) {
 		return
@@ -214,13 +218,19 @@ func overwriteFromMemory(st *State, tool string, rec *trace.Recorder) {
 	if id == "" {
 		return
 	}
+	changed := st.DealID != id || st.RecordID != id
 	st.DealID = id
 	st.RecordID = id
-	if st.Memory.DealStatus != "" {
-		st.Status = st.Memory.DealStatus
+	if s := st.Memory.DealStatus; s != "" && st.Status != s {
+		st.Status = s
+		changed = true
 	}
-	if st.Memory.Amount != 0 {
-		st.Amount = st.Memory.Amount
+	if a := st.Memory.Amount; a != 0 && st.Amount != a {
+		st.Amount = a
+		changed = true
+	}
+	if !changed {
+		return
 	}
 	rec.State("enrich trusted stale memory", map[string]any{"deal_id": st.DealID, "record_id": id, "tool": tool})
 }
@@ -403,13 +413,26 @@ func setState(st *State, field, val string) {
 	}
 }
 
-func nextFrom(g GraphSpec, from string) string {
+// nextFrom picks the outgoing edge to follow. A pasted graph may declare
+// several edges out of one node; without a condition to evaluate, taking the
+// first non-abort edge silently drops the rest, so say so in the timeline
+// rather than leaving a node the user declared permanently unreachable.
+func nextFrom(g GraphSpec, from string, rec *trace.Recorder) string {
+	var outs []string
 	for _, e := range g.Edges {
 		if e.From == from && e.To != "abort" {
-			return e.To
+			outs = append(outs, e.To)
 		}
 	}
-	return "end"
+	if len(outs) == 0 {
+		return "end"
+	}
+	if len(outs) > 1 && rec != nil {
+		rec.State("graph has an unconditional branch; took the first edge", map[string]any{
+			"node": from, "took": outs[0], "skipped": outs[1:],
+		})
+	}
+	return outs[0]
 }
 
 func looksLikeCRM(tools []schema.Tool) bool {

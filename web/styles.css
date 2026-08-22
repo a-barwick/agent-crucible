@@ -245,7 +245,14 @@ button:hover { border-color: var(--ember); color: var(--ember-2); }
 .tile.completed, .tile.recovered { background: var(--ok); }
 .tile.aborted { background: var(--abort); }
 .tile.failed { background: var(--fail); }
+/* A trial the chamber could not run is not an outcome: leave it unpainted and
+   crosshatched so it never reads as a survived or a failed trial. */
+.tile.errored {
+  background: repeating-linear-gradient(45deg, var(--ash), var(--ash) 2px, transparent 2px, transparent 4px);
+  border: 1px solid var(--line);
+}
 .tile.sel { outline: 2px solid var(--ink); outline-offset: 1px; }
+.tile:focus-visible { outline: 2px solid var(--ember-2); outline-offset: 2px; }
 
 .lower {
   display: grid;
