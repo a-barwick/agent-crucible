@@ -324,6 +324,7 @@ def main(argv=None):
         print("react-ok", react)
 
         _smoke_wrapper_honesty()
+        _smoke_async_tools()
         _smoke_callback_errors()
         return
     addr = "127.0.0.1:8091"
@@ -424,6 +425,71 @@ def _smoke_wrapper_honesty() -> None:
         intercept.clear_cb()
         httpio.uninstall()
     print("wrapper-ok", first.calls, second.calls)
+
+
+def _smoke_async_tools() -> None:
+    """An async tool body has to be awaited. Calling a coroutine function from a
+    synchronous wrapper only built a coroutine object: the body never ran, no I/O
+    was recorded, and so every async tool fell through to the chamber's synthetic
+    answer while appearing to have worked."""
+    import asyncio
+
+    from . import httpio, intercept
+
+    try:
+        from langchain_core.tools import tool
+    except ImportError:
+        print("async-tools-skip")
+        return
+
+    ran: list[str] = []
+
+    @tool
+    async def search_ticket(query: str) -> dict:
+        """Search tickets over HTTP."""
+        ran.append(query)
+        import urllib.parse
+        import urllib.request
+
+        url = "http://tickets.example/search?q=" + urllib.parse.quote(query)
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            return json.loads(resp.read().decode())
+
+    class _Chamber:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def before(self, name):
+            return {}
+
+        def tool(self, name, args):
+            self.calls.append(name)
+            return {"ok": True, "data": {"id": "tkt-acme", "status": "Open"}}
+
+        def state(self, message, data=None):
+            return {"ok": True}
+
+    cb = _Chamber()
+    spec = {"tools": [{
+        "name": "search_ticket",
+        "http": {"host": "tickets.example", "match": "/search", "method": "GET"},
+    }]}
+    httpio.install(cb, spec)
+    try:
+        intercept.bind_cb(cb)
+        wrapped = intercept.wrap_tool(search_ticket, cb, "search_ticket")
+        got = asyncio.run(wrapped.ainvoke({"query": "Acme Corp"}))
+    finally:
+        intercept.clear_cb()
+        httpio.clear()
+        httpio.uninstall()
+    if not ran:
+        raise SystemExit("async tool body never ran; the chamber answered for it")
+    if (got or {}).get("id") != "tkt-acme":
+        raise SystemExit("async tool did not return its own intercepted result: %s" % got)
+    if cb.calls != ["search_ticket"]:
+        raise SystemExit("async tool I/O did not reach the chamber once: %s" % cb.calls)
+    print("async-tools-ok", ran, got.get("id"))
 
 
 def _smoke_callback_errors() -> None:
