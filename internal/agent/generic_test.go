@@ -7,6 +7,7 @@ import (
 	"github.com/a-barwick/agent-crucible/internal/clock"
 	"github.com/a-barwick/agent-crucible/internal/fault"
 	"github.com/a-barwick/agent-crucible/internal/rng"
+	"github.com/a-barwick/agent-crucible/internal/schema"
 	"github.com/a-barwick/agent-crucible/internal/trace"
 	"github.com/a-barwick/agent-crucible/internal/world"
 )
@@ -51,5 +52,51 @@ func TestScriptedModelPartialDropsNotify(t *testing.T) {
 	in := ParseModelIntent(resp.Text, DefaultObjective, nil)
 	if in.Notify {
 		t.Fatalf("partial should drop notify: %s", resp.Text)
+	}
+}
+
+func TestPastedCustomToolsHappy(t *testing.T) {
+	spec := Spec{
+		Name: "ticket-bot",
+		Tools: []schema.Tool{
+			{Name: "search_ticket", Required: []string{"query"}},
+			{Name: "update_ticket", Required: []string{"id", "status"}},
+		},
+		Companies: []string{"Acme Corp"},
+		Objective: "Resolve the Acme Corp ticket.",
+	}
+	ag := NewFromSpec(spec, clock.New())
+	clk := clock.New()
+	w := world.SeedFixture(world.Fixture{
+		Records: []world.Record{
+			{ID: "tkt-acme", Fields: map[string]any{"company": "Acme Corp", "status": "Open"}},
+		},
+	})
+	w.BindTools(spec.Tools)
+	tr := trace.New()
+	rec := tr.Recorder(clk.Now)
+	inj := fault.New(rng.Stream(1, 0), 0, fault.MVP)
+	bus := &FaultBus{World: w, Inj: inj, Rec: rec, Clock: clk}
+	res, err := ag.Run(context.Background(), State{
+		Objective: "Resolve the Acme Corp ticket.",
+		Companies: []string{"Acme Corp"},
+		ThreadID:  "tkt",
+	}, bus, rec, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Claimed.Wrote {
+		t.Fatalf("claimed %+v", res)
+	}
+	recd, ok := w.Record("tkt-acme")
+	if !ok || recd.Status() != "Resolved" {
+		t.Fatalf("world record %+v ok=%v", recd, ok)
+	}
+}
+
+func TestParseIntentResolve(t *testing.T) {
+	in := ParseIntent("Resolve the Acme Corp ticket.")
+	if in.DealAction != "resolve" || in.Notify || ActionStatus(in.DealAction) != "Resolved" {
+		t.Fatalf("%+v", in)
 	}
 }

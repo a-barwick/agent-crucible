@@ -42,7 +42,7 @@ func (b *FaultBus) Call(ctx context.Context, tool string, args map[string]any) (
 	}
 
 	if d.Fired && (d.Type == fault.Timeout || d.Type == fault.Permission) {
-		eff := fault.ApplyTool(d, tool, schema.Result{})
+		eff := fault.ApplyToolSpec(d, tool, schema.Result{}, b.tools())
 		if d.Type == fault.Timeout && b.Clock != nil {
 			b.Clock.Advance(50)
 		}
@@ -50,60 +50,57 @@ func (b *FaultBus) Call(ctx context.Context, tool string, args map[string]any) (
 		return eff.Result, nil
 	}
 
-	var snapshot *world.Deal
-	if tool == "write_deal" {
-		if id := schema.StringField(args, "id"); id != "" {
+	var dealSnap *world.Deal
+	var recSnap *world.Record
+	if schema.IsWriteLike(tool) {
+		if id := writeID(args); id != "" {
 			if d0, ok := b.World.Deal(id); ok {
 				cp := d0
-				snapshot = &cp
+				dealSnap = &cp
+			}
+			if r0, ok := b.World.Record(id); ok {
+				cp := r0.Clone()
+				recSnap = &cp
 			}
 		}
 	}
-	raw := b.dispatch(tool, args)
-	eff := fault.ApplyTool(d, tool, raw)
-	if d.Fired && d.Type == fault.Malformed && tool == "write_deal" && raw.OK {
+	raw := b.World.Invoke(tool, args)
+	eff := fault.ApplyToolSpec(d, tool, raw, b.tools())
+	if d.Fired && d.Type == fault.Malformed && schema.IsWriteLike(tool) && raw.OK {
 		// Semantic lie: response says success, roll back the write so the
 		// world does not match what the agent believes.
 		if n := len(b.World.Writes); n > 0 {
 			last := b.World.Writes[n-1]
 			b.World.Writes = b.World.Writes[:n-1]
-			if snapshot != nil {
-				b.World.Deals[last.DealID] = *snapshot
+			if dealSnap != nil {
+				b.World.Deals[last.DealID] = *dealSnap
+			}
+			if recSnap != nil && b.World.Records != nil {
+				b.World.Records[recSnap.ID] = *recSnap
 			}
 		}
 	}
 	if eff.Duplicate {
 		// Deliver the side effect twice. Reads just get two identical envelopes.
-		_ = b.dispatch(tool, args)
+		_ = b.World.Invoke(tool, args)
 		b.Rec.SideEffect("duplicate delivery", map[string]any{"tool": tool})
 	}
 	b.Rec.ToolResult(tool, eff.Result.OK, eff.Result.Error, eff.Result.Data)
 	return eff.Result, nil
 }
 
-func (b *FaultBus) dispatch(tool string, args map[string]any) schema.Result {
-	switch tool {
-	case "lookup_contact":
-		return b.World.LookupContact(schema.StringField(args, "company"))
-	case "get_deal":
-		return b.World.GetDeal(schema.StringField(args, "contact_id"))
-	case "write_deal":
-		return b.World.WriteDeal(
-			schema.StringField(args, "id"),
-			schema.StringField(args, "status"),
-			schema.IntField(args, "amount"),
-			schema.StringField(args, "close_date"),
-			schema.StringField(args, "owner_id"),
-		)
-	case "send_email":
-		return b.World.SendEmail(
-			schema.StringField(args, "to"),
-			schema.StringField(args, "subject"),
-			schema.StringField(args, "body"),
-		)
-	case "check_permission":
-		return b.World.CheckPermission(schema.StringField(args, "perm"))
-	default:
-		return schema.Result{OK: false, Error: "unknown_tool"}
+func (b *FaultBus) tools() []schema.Tool {
+	if b.World == nil {
+		return nil
 	}
+	return b.World.Tools
+}
+
+func writeID(args map[string]any) string {
+	for _, k := range []string{"id", "record_id", "ticket_id", "deal_id"} {
+		if s := schema.StringField(args, k); s != "" {
+			return s
+		}
+	}
+	return ""
 }

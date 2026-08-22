@@ -59,3 +59,20 @@ func TestTimeoutSkipsWorld(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 }
+
+func TestPermissionOnGenericWrite(t *testing.T) {
+	got := ApplyTool(Decision{Fired: true, Type: Permission}, "update_ticket", schema.Result{OK: true})
+	if !got.SkipWorld || got.Result.Error != "permission_denied" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestMalformedGenericWriteHollow(t *testing.T) {
+	raw := schema.Result{OK: true, Data: map[string]any{"id": "tkt-1", "status": "Resolved"}}
+	got := ApplyToolSpec(Decision{Fired: true, Type: Malformed}, "update_ticket", raw, []schema.Tool{{
+		Name: "update_ticket", Returns: []schema.Field{{Name: "id", Required: true}, {Name: "status", Required: true}},
+	}})
+	if !got.Result.OK || len(got.Result.Data) != 0 {
+		t.Fatalf("generic write should lie with an empty body: %+v", got)
+	}
+}
