@@ -4,14 +4,29 @@
 import http from "node:http";
 import path from "node:path";
 import fs from "node:fs";
-import { pathToFileURL } from "node:url";
-import { Callback, wrapTools, applyPlanHook } from "./intercept.mjs";
-import { install as installHTTP } from "./httpio.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { Callback, CallbackError, wrapTools, applyPlanHook } from "./intercept.mjs";
+import * as httpio from "./httpio.mjs";
+
+// A run request carries a spec and fixtures: kilobytes. Buffering whatever
+// arrives lets one request take the heap.
+const MAX_BODY = 4 * 1024 * 1024;
+
+/** The chamber could not start this trial: no entry file, no run export. */
+class EntryError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "EntryError";
+    this.chamber = true;
+  }
+}
 
 function resolveEntry(entry) {
-  if (!entry) throw new Error("empty entry");
+  if (!entry) throw new EntryError("empty entry");
   if (fs.existsSync(entry) && fs.statSync(entry).isFile()) return path.resolve(entry);
-  const here = path.dirname(new URL(import.meta.url).pathname);
+  // fileURLToPath, not new URL(...).pathname: the latter leaves percent-escapes
+  // in place, so a checkout under a path with a space resolved to nothing.
+  const here = path.dirname(fileURLToPath(import.meta.url));
   const roots = [
     process.cwd(),
     path.join(here, "..", ".."),
@@ -27,12 +42,20 @@ function resolveEntry(entry) {
       if (fs.existsSync(cand2) && fs.statSync(cand2).isFile()) return cand2;
     }
   }
-  throw new Error("entry not found: " + entry);
+  throw new EntryError("entry not found: " + entry);
 }
+
+// A counter, not Date.now(): two trials inside the same millisecond shared a
+// cache entry, and with it the tool wrappers bound to the earlier trial.
+let importSeq = 0;
 
 async function loadModule(entry) {
   const abs = resolveEntry(entry);
-  return import(pathToFileURL(abs).href + "?t=" + Date.now());
+  try {
+    return await import(pathToFileURL(abs).href + "?crucible=" + ++importSeq);
+  } catch (err) {
+    throw new EntryError(`cannot load ${abs}: ${(err && err.message) || err}`);
+  }
 }
 
 function write(res, code, body) {
@@ -44,21 +67,54 @@ function write(res, code, body) {
 async function handleRun(reqBody) {
   const spec = reqBody.spec || {};
   const entry = reqBody.entry || spec.entry;
-  if (!entry) throw new Error("js runtime needs spec.entry");
+  if (!entry) throw new EntryError("js runtime needs spec.entry");
   const cb = new Callback(reqBody.callback || "", reqBody.token || "");
   const mod = await loadModule(entry);
-  installHTTP(cb, spec);
-  if (mod.tools) wrapTools(mod.tools, cb);
-  if (mod.DISPATCH) wrapTools(mod.DISPATCH, cb);
-  if (mod.FUNCTIONS) wrapTools(mod.FUNCTIONS, cb);
-  const hooked = applyPlanHook(reqBody, await cb.before("plan"));
-  if (typeof mod.run !== "function") throw new Error(entry + " has no run(req) export");
-  const out = await mod.run(hooked);
-  if (out && typeof out === "object") {
-    out.runtime = out.runtime || "js";
-    out.checkpoint = true;
+  if (typeof mod.run !== "function") throw new EntryError(entry + " has no run(req) export");
+  const sess = httpio.install(cb, spec);
+  return httpio.run(sess, async () => {
+    if (mod.tools) wrapTools(mod.tools, cb);
+    if (mod.DISPATCH) wrapTools(mod.DISPATCH, cb);
+    if (mod.FUNCTIONS) wrapTools(mod.FUNCTIONS, cb);
+    const hooked = applyPlanHook(reqBody, await cb.before("plan"));
+    const out = await mod.run(hooked);
+    if (out && typeof out === "object") {
+      out.runtime = out.runtime || "js";
+      out.checkpoint = true;
+    }
+    return out;
+  });
+}
+
+async function readBody(req, res) {
+  let size = 0;
+  const chunks = [];
+  for await (const c of req) {
+    size += c.length;
+    if (size > MAX_BODY) {
+      write(res, 413, { error: `body over ${MAX_BODY} bytes` });
+      req.destroy();
+      return null;
+    }
+    chunks.push(c);
   }
-  return out;
+  let body;
+  try {
+    body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
+  } catch (err) {
+    write(res, 400, { error: "bad json: " + ((err && err.message) || err) });
+    return null;
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    write(res, 400, { error: "body must be a JSON object" });
+    return null;
+  }
+  return body;
+}
+
+function detail(err) {
+  if (!err) return "unknown error";
+  return String(err.stack || err.message || err);
 }
 
 function createServer() {
@@ -72,29 +128,75 @@ function createServer() {
         write(res, 404, { error: "not found" });
         return;
       }
-      const chunks = [];
-      for await (const c of req) chunks.push(c);
-      let body = {};
-      try {
-        body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
-      } catch {
-        write(res, 400, { error: "bad json" });
+      const body = await readBody(req, res);
+      if (body === null) return;
+      write(res, 200, await handleRun(body));
+    } catch (err) {
+      if (err instanceof EntryError || err instanceof CallbackError || (err && err.chamber)) {
+        // The chamber could not run this trial. Say so explicitly so the Go
+        // side counts it as errored rather than folding it into the score.
+        write(res, 502, { chamber_error: true, error: detail(err) });
         return;
       }
-      const out = await handleRun(body);
-      write(res, 200, out);
-    } catch (err) {
-      write(res, 500, { error: String(err && err.message ? err.message : err), terminal: "abort", claimed: { error: String(err) } });
+      // The agent's own code threw. An agent that crashes has failed the
+      // trial, so that is a verdict — with the stack attached as the reason.
+      console.error("crucible-js: agent raised: " + detail(err));
+      write(res, 200, {
+        terminal: "abort",
+        intent: {},
+        claimed: { error: "agent raised " + ((err && err.name) || "Error") },
+        steps: 0,
+        runtime: "js",
+        agent_error: detail(err),
+      });
     }
   });
 }
 
+// An unhandled rejection inside an agent used to take the sidecar down with no
+// explanation, which reads to the runner as every remaining trial failing.
+process.on("unhandledRejection", (err) => {
+  console.error("crucible-js: unhandled rejection: " + detail(err));
+});
+process.on("uncaughtException", (err) => {
+  console.error("crucible-js: uncaught exception: " + detail(err));
+});
+
 const argv = process.argv.slice(2);
-let addr = "127.0.0.1:8093";
-const i = argv.indexOf("--addr");
-if (i >= 0) addr = argv[i + 1];
+function flag(name, fallback) {
+  const i = argv.indexOf(name);
+  return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : fallback;
+}
+
+// Exit when the runner that started us does. The runner kills its sidecars on
+// the way out, but it does not always get the chance: SIGKILL, a panic, or a
+// Ctrl-C that skips the cleanup path all leave this process reparented to init,
+// holding a port and serving the code it happened to start with. Comparing
+// process.ppid to the pid we were handed is immune to pid reuse -- once it
+// differs, our parent is gone whoever adopted us.
+function watchParent(parent, server) {
+  const timer = setInterval(() => {
+    if (process.ppid === parent) return;
+    clearInterval(timer);
+    // Announce it only if anyone can still hear. stderr is a pipe to the
+    // parent, so writing it can throw EPIPE by now, and that must not stop the
+    // exit below -- otherwise this leaves exactly the orphan it prevents.
+    try {
+      console.error("crucible-js: parent " + parent + " exited, shutting down");
+    } catch {}
+    server.close();
+    // close() only stops new connections; a keep-alive socket from the dead
+    // parent would hold the loop open forever.
+    process.exit(0);
+  }, 1000);
+  timer.unref();
+}
+
+const addr = flag("--addr", "127.0.0.1:8093");
+const parent = Number(flag("--parent-pid", 0));
 const [host, port] = addr.split(":");
 const server = createServer();
 server.listen(Number(port), host, () => {
   console.log("crucible-js listening on " + addr);
 });
+if (parent > 0) watchParent(parent, server);

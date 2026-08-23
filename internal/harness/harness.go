@@ -6,8 +6,12 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
+	"net"
+	"net/url"
+	"strings"
 
 	"github.com/a-barwick/agent-crucible/internal/agent"
 	"github.com/a-barwick/agent-crucible/internal/ai"
@@ -89,6 +93,13 @@ type Trial struct {
 	Intent     agent.Intent  `json:"intent"`
 	Claimed    agent.Claim   `json:"claimed"`
 	Events     []trace.Event `json:"events"`
+	// Decisions is every die roll the injector made, whether or not it fired.
+	// It is the audit trail behind the timeline: same seed, same decisions.
+	Decisions []fault.Decision `json:"decisions,omitempty"`
+	// Error is set when the chamber itself could not run the trial — no
+	// sidecar, no entry file, a cancelled context. It is not an agent verdict
+	// and does not count against survival.
+	Error string `json:"error,omitempty"`
 }
 
 type Suite struct {
@@ -104,6 +115,12 @@ type Suite struct {
 	ByFault   []cluster.Cluster `json:"by_fault"`
 	Critique  critique.Critique `json:"critique"`
 	Trials    []Trial           `json:"trials"`
+	// Scored is how many trials produced a verdict; Errored is how many the
+	// chamber could not run. Survival and Safety are over Scored, so a broken
+	// sidecar reads as a broken sidecar instead of a fragile agent.
+	Scored  int    `json:"scored"`
+	Errored int    `json:"errored"`
+	Error   string `json:"error,omitempty"`
 }
 
 type Sweep struct {
@@ -114,15 +131,32 @@ type Sweep struct {
 
 func Run(ctx context.Context, cfg Config) Suite {
 	cfg = cfg.withDefaults()
-	trials := make([]Trial, cfg.Trials)
-	refs := make([]cluster.TrialRef, cfg.Trials)
+	var trials []Trial
+	var refs []cluster.TrialRef
 	counts := map[string]int{}
-	var done, safe, cleanN, cleanOK int
+	var done, safe, cleanN, cleanOK, scored, errored int
+	var firstErr string
 
 	for i := 0; i < cfg.Trials; i++ {
+		if err := ctx.Err(); err != nil {
+			// The caller's deadline passed. Report the trials we actually ran
+			// rather than grinding through the rest past the deadline.
+			if firstErr == "" {
+				firstErr = err.Error()
+			}
+			break
+		}
 		tr := runOne(ctx, cfg, i)
-		trials[i] = tr
-		refs[i] = cluster.TrialRef{N: tr.N, Outcome: tr.Outcome, Faults: tr.Faults, Violations: tr.Violations}
+		trials = append(trials, tr)
+		if tr.Error != "" {
+			errored++
+			if firstErr == "" {
+				firstErr = tr.Error
+			}
+			continue
+		}
+		scored++
+		refs = append(refs, cluster.TrialRef{N: tr.N, Outcome: tr.Outcome, Faults: tr.Faults, Violations: tr.Violations})
 		counts[string(tr.Outcome)]++
 		if tr.Completed {
 			done++
@@ -138,7 +172,7 @@ func Run(ctx context.Context, cfg Config) Suite {
 		}
 	}
 
-	surv := ratio(done, cfg.Trials)
+	surv := ratio(done, scored)
 	clean := 1.0
 	if cleanN > 0 {
 		clean = ratio(cleanOK, cleanN)
@@ -147,9 +181,12 @@ func Run(ctx context.Context, cfg Config) Suite {
 	byFault := cluster.ByFault(refs)
 	samples := make([]ai.Evidence, 0, len(trials))
 	for _, tr := range trials {
+		if tr.Error != "" {
+			continue
+		}
 		var evs []string
 		for _, e := range tr.Events {
-			if e.Kind == "state" || e.Kind == "fault" {
+			if e.Kind == trace.KindState || e.Kind == trace.KindFault {
 				evs = append(evs, e.Message)
 			}
 		}
@@ -159,7 +196,7 @@ func Run(ctx context.Context, cfg Config) Suite {
 		})
 	}
 	crit := ai.Explain(ctx, ai.ExplainInput{
-		Trials:   cfg.Trials,
+		Trials:   scored,
 		P:        cfg.P,
 		Survival: surv,
 		Clean:    clean,
@@ -168,22 +205,28 @@ func Run(ctx context.Context, cfg Config) Suite {
 		Samples:  samples,
 		Tools:    toolNames(cfg),
 		Agent:    cfg.Agent,
-		Client:   ai.FromEnv(cfg.AI),
+		Client:   ai.ClientFromEnv(cfg.AI),
 	})
 
 	return Suite{
-		ID:        fmt.Sprintf("suite-%d-%d-p%.0f", cfg.Seed, cfg.Trials, cfg.P*100),
-		Config:    cfg,
-		Agent:     cfg.Agent,
-		Scenario:  cfg.Scenario,
+		ID:     fmt.Sprintf("suite-%d-%d-p%.0f", cfg.Seed, cfg.Trials, cfg.P*100),
+		Config: cfg,
+		Agent:  cfg.Agent,
+		// The scenario that ran, not the one asked for. A drop-in agent sent
+		// close-acme runs the ticket task; reporting the request made the
+		// results panel and the replay line name a task nobody had run.
+		Scenario:  ranScenario(cfg),
 		Survival:  surv,
-		Safety:    ratio(safe, cfg.Trials),
+		Safety:    ratio(safe, scored),
 		CleanRate: clean,
 		Counts:    counts,
 		Clusters:  shapes,
 		ByFault:   byFault,
 		Critique:  crit,
 		Trials:    trials,
+		Scored:    scored,
+		Errored:   errored,
+		Error:     firstErr,
 	}
 }
 
@@ -196,9 +239,15 @@ func RunSweep(ctx context.Context, cfg Config, maxP, step float64) Sweep {
 		step = 0.01
 	}
 	var suites []Suite
-	for p := 0.0; p <= maxP+1e-9; p += step {
+	// Count in whole steps instead of accumulating a float: 0.1 added thirty
+	// times is not 3.0, and the drift decides whether the last suite runs.
+	steps := int(math.Floor(maxP/step + 1e-9))
+	for i := 0; i <= steps; i++ {
+		if ctx.Err() != nil {
+			break
+		}
 		c := cfg
-		c.P = round2(p)
+		c.P = round2(float64(i) * step)
 		suites = append(suites, Run(ctx, c))
 	}
 	return Sweep{Config: cfg, Step: step, Suites: suites}
@@ -216,7 +265,11 @@ func Replay(ctx context.Context, cfg Config, n int) Trial {
 }
 
 func runOne(ctx context.Context, cfg Config, n int) Trial {
-	scn := resolveScenario(cfg)
+	scn, err := resolveScenario(cfg)
+	if err != nil {
+		// Not the agent's failure, so it is errored rather than scored.
+		return Trial{N: n, Error: err.Error()}
+	}
 	spec := specOf(cfg)
 	scn.Expect = resolveExpect(scn)
 
@@ -229,6 +282,11 @@ func runOne(ctx context.Context, cfg Config, n int) Trial {
 	tr := trace.New()
 	rec := tr.Recorder(clk.Now)
 	inj := fault.New(r, cfg.P, cfg.Faults)
+	// "Budget trips halfway through" only holds if the budget scales with the
+	// graph. A fixed budget of three never trips on a two-tool agent, which
+	// silently made cost_ceiling unreachable for every drop-in.
+	budget := costBudget(len(toolNames(cfg)))
+	inj.SetCostBudget(budget)
 	saver := agent.NewMemorySaver()
 
 	st := agent.State{
@@ -253,21 +311,29 @@ func runOne(ctx context.Context, cfg Config, n int) Trial {
 		rec.Fault(fault.ContextPressure, "context", "flooded state with lookalike company mentions")
 	}
 	if d := inj.Decide(fault.SitePreflight, "budget", fault.CostCeiling); d.Fired && d.Type == fault.CostCeiling {
-		rec.Fault(fault.CostCeiling, "budget", "cost ceiling armed; tools after the midpoint will refuse")
+		// Armed, not fired: the budget only becomes a fault once a tool call
+		// actually trips it, which the bus records. Counting the arming here
+		// would attribute a cost-ceiling failure to trials that never hit one.
+		// The budget actually armed, not the package default: they differ for
+		// every agent whose tool surface is not six, and the timeline is what
+		// someone reads to work out why a run stopped where it did.
+		rec.State("cost ceiling armed", map[string]any{"budget": budget})
 	}
 
 	hook := &nodeHook{inj: inj, alt: scn.AltObjective}
 	bus := &agent.FaultBus{World: w, Inj: inj, Rec: rec, Clock: clk}
 	ag, err := resolveAgent(ctx, cfg, clk, saver)
 	if err != nil {
-		res := agent.Result{Claimed: agent.Claim{Error: err.Error()}}
-		v := judge.Judge(scn.Expect, w, tr, res)
-		rec.Add(trace.Event{Kind: trace.KindVerdict, Message: "failed: " + err.Error()})
-		return Trial{N: n, Outcome: v.Outcome, Reason: err.Error(), Events: tr.Events}
+		return errTrial(n, tr, rec, clk, err)
 	}
 	res, err := ag.Run(ctx, st, bus, rec, hook)
-	if err != nil && res.Claimed.Error == "" {
-		res.Claimed.Error = err.Error()
+	if err != nil {
+		if infraErr(err) {
+			return errTrial(n, tr, rec, clk, err)
+		}
+		if res.Claimed.Error == "" {
+			res.Claimed.Error = err.Error()
+		}
 	}
 
 	v := judge.Judge(scn.Expect, w, tr, res)
@@ -276,7 +342,7 @@ func runOne(ctx context.Context, cfg Config, n int) Trial {
 		for _, e := range tr.Events {
 			evs = append(evs, e.Message)
 		}
-		v = ai.Evaluate(ctx, v, res, evs, ai.FromEnv(cfg.AI))
+		v = ai.Evaluate(ctx, v, res, evs, ai.ClientFromEnv(cfg.AI))
 	}
 	rec.Add(trace.Event{Kind: trace.KindVerdict, Message: string(v.Outcome) + ": " + v.Reason})
 
@@ -293,7 +359,35 @@ func runOne(ctx context.Context, cfg Config, n int) Trial {
 		Intent:     res.Intent,
 		Claimed:    res.Claimed,
 		Events:     tr.Events,
+		Decisions:  inj.Decisions(),
 	}
+}
+
+// errTrial records a trial the chamber could not run. It carries no verdict:
+// a missing sidecar is not evidence about the agent's architecture, and
+// scoring it as "failed" would quietly depress every survival number.
+func errTrial(n int, tr *trace.Trace, rec *trace.Recorder, clk *clock.Clock, err error) Trial {
+	rec.Add(trace.Event{Kind: trace.KindVerdict, Message: "chamber error: " + err.Error()})
+	return Trial{N: n, Reason: err.Error(), Error: err.Error(), Ticks: clk.Now(), Events: tr.Events}
+}
+
+// infraErr reports whether the agent failed to run at all, as opposed to
+// running and reaching a bad state. Cancellation and transport errors are the
+// chamber's problem; anything the agent's own nodes returned is a verdict.
+func infraErr(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var chamber *runtime.ChamberError
+	if errors.As(err, &chamber) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var uerr *url.Error
+	return errors.As(err, &uerr)
 }
 
 type nodeHook struct {
@@ -322,28 +416,59 @@ func (h *nodeHook) BeforeNode(_ context.Context, name string, st *agent.State, r
 	}
 }
 
-func resolveScenario(cfg Config) scenario.Scenario {
+// resolveScenario returns the scenario the trial will actually run. An id that
+// names nothing is an error rather than a silent fallback: scenario.Get answers
+// close-acme for anything it does not recognise, so a typo or a generated id
+// whose definition never made it into extra_scenarios ran the Acme deal-close
+// task and reported the result under the name that was asked for.
+func resolveScenario(cfg Config) (scenario.Scenario, error) {
 	if cfg.Bundle != nil {
 		b := cfg.Bundle.Scenario
 		if b.Objective != "" || b.ID != "" || b.Expect.Specified() || b.Fixture != nil {
 			if b.ID == "" && cfg.Scenario != "" {
 				b.ID = cfg.Scenario
 			}
-			return b
+			return b, nil
 		}
 	}
 	if agent.IsDropIn(cfg.Agent, specOf(cfg)) && (cfg.Scenario == "" || cfg.Scenario == scenario.CloseAcmeID) {
-		return scenario.Ticket()
+		return scenario.Ticket(), nil
 	}
 	if s, ok := scenario.Lookup(cfg.Scenario); ok {
-		return s
+		return s, nil
 	}
 	for _, s := range cfg.Extra {
 		if s.ID == cfg.Scenario {
-			return s
+			return s, nil
 		}
 	}
-	return scenario.Get(cfg.Scenario)
+	if cfg.Scenario == "" {
+		return scenario.Get(""), nil
+	}
+	return scenario.Scenario{}, fmt.Errorf(
+		"unknown scenario %q; built-in ids are %s. A generated scenario has to be passed with it, in extra_scenarios or bundle.scenario",
+		cfg.Scenario, strings.Join(scenarioIDs(), ", "))
+}
+
+// ranScenario names the scenario a suite actually ran, falling back to the
+// requested id when it could not be resolved at all (the suite carries the
+// error, and naming nothing there would be less informative than naming what
+// was asked for).
+func ranScenario(cfg Config) string {
+	scn, err := resolveScenario(cfg)
+	if err != nil || scn.ID == "" {
+		return cfg.Scenario
+	}
+	return scn.ID
+}
+
+func scenarioIDs() []string {
+	infos := scenario.Summaries()
+	out := make([]string, 0, len(infos))
+	for _, s := range infos {
+		out = append(out, s.ID)
+	}
+	return out
 }
 
 func specOf(cfg Config) *agent.Spec {
@@ -386,7 +511,10 @@ func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent
 	if cfg.Bundle != nil && (name == "" || name == agent.IDPasted) {
 		name = agent.IDPasted
 	}
-	spec := hydrateSpec(cfg)
+	spec, err := hydrateSpec(cfg)
+	if err != nil {
+		return nil, err
+	}
 
 	if spec != nil && spec.Endpoint != "" {
 		kind := spec.Runtime
@@ -471,7 +599,12 @@ func resolveAgent(ctx context.Context, cfg Config, clk *clock.Clock, saver agent
 	}
 }
 
-func hydrateSpec(cfg Config) *agent.Spec {
+// hydrateSpec overlays the catalog preset for a known agent id and resolves
+// spec.Entry to a real file. Resolution can fail — the entry may not exist, or
+// may sit outside the roots the runtime is willing to import from — and that is
+// a hard error rather than something to paper over, because the alternative is
+// handing an unchecked path to a Python import.
+func hydrateSpec(cfg Config) (*agent.Spec, error) {
 	spec := specOf(cfg)
 	switch cfg.Agent {
 	case agent.IDTicketLangGraph, agent.IDNativeLangGraph:
@@ -490,11 +623,15 @@ func hydrateSpec(cfg Config) *agent.Spec {
 		spec = overlaySpec(agent.ForeignHTTPSpec(), spec)
 	}
 	if spec != nil && spec.Entry != "" {
+		resolved, err := runtime.ResolveEntry(spec.Entry)
+		if err != nil {
+			return nil, err
+		}
 		cp := *spec
-		cp.Entry = runtime.FindEntry(spec.Entry)
+		cp.Entry = resolved
 		spec = &cp
 	}
-	return spec
+	return spec, nil
 }
 
 func overlaySpec(base agent.Spec, over *agent.Spec) *agent.Spec {
@@ -536,7 +673,9 @@ func overlaySpec(base agent.Spec, over *agent.Spec) *agent.Spec {
 }
 
 func toolNames(cfg Config) []string {
-	spec := hydrateSpec(cfg)
+	// A spec whose entry does not resolve still declares tools, and the caller
+	// only wants the names; resolveAgent reports the real failure.
+	spec, _ := hydrateSpec(cfg)
 	if spec == nil || len(spec.Tools) == 0 {
 		if agent.IsDropIn(cfg.Agent, spec) {
 			spec = overlaySpec(agent.TicketLangGraphSpec(), spec)
@@ -553,6 +692,15 @@ func toolNames(cfg Config) []string {
 		out = append(out, t.Name)
 	}
 	return out
+}
+
+// costBudget is half the declared tool surface, rounded up, so the ceiling
+// lands mid-run whether the agent advertises two tools or twelve.
+func costBudget(tools int) int {
+	if tools < 2 {
+		return 1
+	}
+	return (tools + 1) / 2
 }
 
 func ratio(n, d int) float64 {

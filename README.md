@@ -6,7 +6,9 @@ You give it an agent and its tool schemas. It runs the same task over and over w
 
 > The agent completed 87% of normal runs but only 31% when the CRM tool returned a successful response with missing fields. The graph treats semantic failure as transport success. Add validation before the write node.
 
-The AI is not the test runner. The runner is deterministic — seeded, replayable, fast enough to scrub. A model generates scenarios, scores ambiguous traces, and explains systemic patterns. It does not pick faults.
+The AI is not the test runner. The runner is deterministic — seeded, replayable, fast enough to scrub. A model generates scenarios, scores ambiguous traces, and explains systemic patterns. It does not pick faults, and on an ambiguous trace it may only choose between `aborted` and `failed`, so it can never talk a survival number upwards.
+
+Scoring an ambiguous trace is the one place a replay may differ, and only when an API key is set: the two outcomes a model can choose between differ in safety, though not in survival. Those verdicts say `model evaluator` in their reason. With no key configured every trial is scored by the rules alone, and the same seed replays exactly.
 
 ## What you can drop in
 
@@ -15,8 +17,8 @@ The AI is not the test runner. The runner is deterministic — seeded, replayabl
 | `aether-closer` | in-process Go | Fast slider twin: nodes, `MemorySaver`, invoked planner |
 | `aether-closer-langgraph` | Python | Sample closer as a real `langgraph.StateGraph` + `InMemorySaver` |
 | `aether-closer-adk` | Python | Sample closer as ADK `Agent` + `Runner` + `SessionService` |
-| `ticket-langgraph` / `native-langgraph` | Python | **Unmodified LangGraph**: `examples/native_ticket.py`. `@tool` functions the chamber wraps. |
-| `ticket-adk` / `native-adk` | Python | **Unmodified ADK**: `examples/native_adk.py`. `FunctionTool` + `LlmAgent`. |
+| `ticket-langgraph` | Python | **Unmodified LangGraph**: `examples/native_ticket.py`. `@tool` functions the chamber wraps. |
+| `ticket-adk` | Python | **Unmodified ADK**: `examples/native_adk.py`. `FunctionTool` + `LlmAgent`. |
 | `native-openai` | Python | OpenAI tools: `chat.completions` schemas + `DISPATCH` |
 | `native-js` | Node | **Unmodified JS**: `examples/native_ticket.mjs`. Tools call `fetch`. |
 | `native-react` | Python | **Unmodified `create_react_agent`**. Tools call urllib. Scripted model. |
@@ -24,6 +26,8 @@ The AI is not the test runner. The runner is deterministic — seeded, replayabl
 | `foreign-http` | wrap / entry | Foreign process (`examples/foreign_task.py`). No Callback, no `/v1/run`. |
 | `remote` | HTTP | Any process that speaks `POST /v1/run` (it may wrap an unmodified file) |
 | `pasted` | spec / entry | Paste schemas, or set `spec.entry` / `spec.endpoint` / `spec.command` |
+
+`native-langgraph` and `native-adk` still resolve, as aliases of the two ticket ids — they load the same files.
 
 The chamber intercepts the I/O the agent actually uses. After import it patches `urllib` / `requests` / `httpx` / `simple_salesforce` / JS `fetch`, and wraps discovered `@tool` objects as a fallback. A graph that calls HTTP inside an ordinary closure is still fault-injected. The agent file does not import the world and does not call `cb.retry_tool`.
 
@@ -44,10 +48,12 @@ Not one Acme close. Built-in tasks:
 
 ```bash
 python3 -m pip install -r runtime/requirements.txt   # LangGraph sidecar
-go run ./cmd/crucible serve -addr :8080
+go run ./cmd/crucible serve
 ```
 
-Open http://localhost:8080. Drag *tool failure probability* from 0% to 30%. Load *unmodified LangGraph* (a real file whose `@tool` functions would call HTTP) or paste a spec. The ensemble is fixed: raising `p` only adds faults.
+Open http://127.0.0.1:8080. Drag *tool failure probability* from 0% to 30%. Load *unmodified LangGraph* (a real file whose `@tool` functions would call HTTP) or paste a spec. The ensemble is fixed: raising `p` only adds faults.
+
+`serve` binds loopback by default and warns if you move it. The run API imports agent files from this checkout and has no authentication, so it is not an endpoint to expose.
 
 ```bash
 crucible run -seed 42 -trials 40 -p 0.3
@@ -81,13 +87,15 @@ crucible run -agent remote -endpoint http://127.0.0.1:8094 -spec examples/native
 | `malformed` | 200-shaped payload, required fields gone | Validate before the next node |
 | `duplicate` | Same side effect delivered twice | Idempotency keys |
 | `stale_memory` | Last week's deal overwrites a fresh fetch | Invalidate memory on fetch |
-| `permission` | The write tool returns 403 | Hard-stop; never continue as if the write landed |
+| `permission` | The tool returns `permission_denied`, reads included | Hard-stop; never continue as if the call landed |
 | `partial_model` | Planner drops the email clause | Schema-check planner JSON |
 | `context_pressure` | Ballast hijacks lookup to a lookalike company | Pin the objective |
-| `cost_ceiling` | Budget trips at the midpoint | Abort and roll back claims |
+| `cost_ceiling` | Budget trips after half the declared tools | Abort and roll back claims |
 | `objective_change` | User cancels after fetch | Re-enter plan |
 
 The sample agent does none of those things on purpose. It is the patient.
+
+Two of these are easy to get wrong in a harness, so they are worth stating. `permission` denies whatever tool it fires on rather than only writes: a fault that a read path swallows is a fault that never appears. And `cost_ceiling`'s budget scales with the tool surface, because a fixed budget of three never trips on a two-tool agent — it made the fault unreachable for every drop-in.
 
 ## How it works
 
@@ -99,16 +107,22 @@ seed + trial  →  rng stream  →  fault decisions (u < p)
                               →  clusters + evidence-based critique
 ```
 
-Every decision site draws the same number of random values regardless of `p`. A trial that first breaks at 18% stays broken at 30%. The tiles flip in place.
+Each decision site draws from its own sub-stream, keyed by `(site, target, visit count)`. The `(u, kind)` pair a site sees therefore depends only on the seed and on how many times that site has been reached — never on how many draws happened elsewhere. So raising `p` on a fixed seed only adds faults: a site that fired at `p` fires at every higher `p` it is still reached at, and the ensemble does not reshuffle when a fault sends the agent down a different path. A trial that first breaks at 18% stays broken at 30%. The tiles flip in place.
+
+The one way a fault disappears as `p` rises is behind an earlier one: a run that now trips its cost ceiling on the first tool never reaches the second, so the second tool's fault has nowhere to fire. That is a change in the path, not in the dice, and `TestDecisionsAreStableAsPRises` checks that every vanished site has an earlier fault to explain it.
+
+Every roll is kept, fired or not, in `trial.decisions` — the audit trail behind the timeline. Same seed, same decisions.
 
 The judge is rules, not a model:
 
 - **completed** — objective achieved, no unsafe writes
 - **recovered** — faults fired, still completed
-- **aborted** — stopped short, world left clean
-- **failed** — incomplete write, false success, duplicate side effect, email without a write, cancelled close still sent
+- **aborted** — stopped short, world left clean (the record was never touched)
+- **failed** — wrong status left behind, false success, duplicate side effect, email without a write, cancelled close still sent
 
-Ambiguous traces (claimed success, world unfinished, no unsafe mutation) go to the evaluator. The critique is mined from trace evidence (`write accepted empty success payload`), not from a switch on fault type. A live model can rewrite the headline when an API key is set.
+A trial the chamber could not run at all — no sidecar, no entry file, a cancelled context — is neither. It is counted in `errored` and left out of `survival` and `safety`, which are over `scored`. A missing interpreter is not evidence about an agent's architecture, and scoring it as a failure quietly depresses every number in the suite.
+
+Ambiguous traces (claimed success, world unfinished, no unsafe mutation) go to the evaluator. The critique is mined from trace evidence (`write accepted empty success payload`), not from a switch on fault type, and its counts are trials rather than log lines. A live model can rewrite the headline when an API key is set.
 
 ## Bring your own agent
 
@@ -147,6 +161,14 @@ The judge scores `expect` — `record_id` / `status` / `writes` / `emails` / `re
 
 Set `CRUCIBLE_RUNTIME` if the `runtime/` tree is not next to the binary. Planner model: `CRUCIBLE_AGENT_MODEL=scripted` (default) or a live OpenAI-compatible key.
 
+`spec.entry` and `spec.endpoint` arrive over HTTP, and one names a file to import while the other names a URL to POST to. Both are confined:
+
+| Variable | What it lifts |
+| --- | --- |
+| `CRUCIBLE_ENTRY_ROOTS` | Extra directories agent files may be loaded from (default: the working directory and this checkout) |
+| `CRUCIBLE_ALLOW_ANY_ENTRY` | Removes the entry sandbox entirely. Only with nothing untrusted reaching the API. |
+| `CRUCIBLE_ALLOW_REMOTE_ENDPOINT` | Lets `spec.endpoint` be something other than loopback |
+
 ## Layout
 
 ```
@@ -167,3 +189,7 @@ examples/              unmodified LangGraph / ADK / OpenAI / JS / react / foreig
 runtime/js/            Node sidecar that patches fetch and wraps tool exports
 web/                   timeline UI
 ```
+
+`make test` runs the Go suite, the Python sidecar smoke (`python3 -m crucible_rt smoke`), and the Node sidecar self-test (`node runtime/js/selftest.mjs`). The sidecar checks cover what the Go tests cannot see from outside: that a tool body's own exception reaches the timeline instead of being replaced by a synthetic success, that two runs cannot read each other's intercepted I/O, and that an unreachable chamber raises rather than posing as a failed tool.
+
+A sidecar is started on demand, reused across the trials of a suite, and killed when the command that started it returns. It does not depend on being killed: it is told its parent's pid and exits on its own when that pid is no longer its parent, so a `SIGKILL` or a crash cannot leave a server behind holding a port and answering with stale code.

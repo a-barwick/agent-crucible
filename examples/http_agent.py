@@ -17,8 +17,12 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(ROOT, "runtime"))
 
-from crucible_rt.callback import Callback  # noqa: E402
+from crucible_rt.callback import Callback, CallbackError  # noqa: E402
 from ticket_graph import run as run_graph  # noqa: E402
+
+# A run request carries a spec and fixtures: kilobytes. Reading whatever
+# Content-Length claims lets one request buy the whole heap.
+MAX_BODY = 4 << 20
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -43,10 +47,17 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/v1/run":
             self._write(404, {"error": "not found"})
             return
-        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._write(400, {"error": "bad content-length"})
+            return
+        if n > MAX_BODY:
+            self._write(413, {"error": "body too large"})
+            return
         try:
             req = json.loads(self.rfile.read(n).decode() or "{}")
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             self._write(400, {"error": "bad json"})
             return
         cb = Callback(req.get("callback") or "", req.get("token") or "")
@@ -54,8 +65,23 @@ class Handler(BaseHTTPRequestHandler):
             out = run_graph(cb, req)
             out["process"] = True
             self._write(200, out)
+        except CallbackError as e:  # pragma: no cover
+            # The chamber is unreachable, which is not a verdict on this agent.
+            # Reporting it as an abort let a broken harness be scored as an
+            # agent that gave up. 502 plus chamber_error is what the runner
+            # reads as errored.
+            self._write(502, {"chamber_error": True, "error": str(e)})
         except Exception as e:  # pragma: no cover
-            self._write(500, {"error": str(e), "terminal": "abort", "claimed": {"error": str(e)}})
+            # The agent's own code raised, which *is* a verdict: an agent that
+            # crashes mid-run has failed the trial.
+            self._write(200, {
+                "terminal": "abort",
+                "intent": {},
+                "claimed": {"error": "agent raised " + type(e).__name__},
+                "steps": 0,
+                "process": True,
+                "agent_error": str(e),
+            })
 
 
 def main(argv=None):

@@ -8,6 +8,7 @@ This file never imports Callback and never calls retry_tool.
 from __future__ import annotations
 
 import json
+import threading
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, ToolMessage
@@ -22,7 +23,14 @@ except ImportError:  # pragma: no cover
 
 from ticket_logic import action_status, http_json, last_company, memory_id, note, parse_objective
 
-_CTX: dict = {}
+# Per-run, not per-process. The sidecar can have two runs in flight, and the
+# scripted planner reads this on every turn: as a module global, one trial's
+# objective, stale memory and ballast leaked into the other's plan.
+_ctx = threading.local()
+
+
+def _context() -> dict:
+    return getattr(_ctx, "value", None) or {}
 
 
 @tool
@@ -52,12 +60,12 @@ class ScriptedTicketModel(BaseChatModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         n = sum(1 for m in messages if isinstance(m, ToolMessage) or getattr(m, "type", "") == "tool")
-        objective = _CTX.get("objective") or ""
-        companies = _CTX.get("companies") or ["Acme Corp", "Globex"]
+        objective = _context().get("objective") or ""
+        companies = _context().get("companies") or ["Acme Corp", "Globex"]
         intent = parse_objective(objective, companies)
         if n == 0:
             query = intent.get("entity") or intent.get("company") or ""
-            hijack = last_company(_CTX.get("junk") or "", companies)
+            hijack = last_company(_context().get("junk") or "", companies)
             if hijack and hijack != query:
                 query = hijack
                 note("lookup hijacked by context ballast", {"company": query, "tool": "search_ticket"})
@@ -75,7 +83,7 @@ class ScriptedTicketModel(BaseChatModel):
                 except json.JSONDecodeError:
                     data = {}
             tid = data.get("id") or ""
-            mid = memory_id(_CTX.get("memory"))
+            mid = memory_id(_context().get("memory"))
             if mid:
                 tid = mid
                 note("enrich trusted stale memory", {"record_id": mid, "tool": "search_ticket"})
@@ -95,16 +103,16 @@ def build(req: dict | None = None):
 
 
 def run(req: dict) -> dict:
-    global _CTX
-    _CTX = {
+    ctx = {
         "objective": req.get("objective") or "Resolve the Acme Corp ticket.",
         "memory": req.get("memory") or {},
         "junk": req.get("junk") or "",
         "companies": req.get("companies") or ["Acme Corp", "Globex"],
     }
+    _ctx.value = ctx
     graph = create_react_agent(ScriptedTicketModel(), TOOLS, checkpointer=InMemorySaver(), name="ticket-react")
     result = graph.invoke(
-        {"messages": [("user", _CTX["objective"])]},
+        {"messages": [("user", ctx["objective"])]},
         {"configurable": {"thread_id": req.get("thread_id") or "react"}},
     )
     return finish(result, req)
@@ -141,7 +149,7 @@ def finish(result: dict, req: dict) -> dict:
                 status = data.get("status") or status
                 if data.get("error") in ("timeout", "cost_ceiling", "unavailable"):
                     error = data["error"]
-    intent = parse_objective(_CTX.get("objective") or "", _CTX.get("companies"))
+    intent = parse_objective(_context().get("objective") or "", _context().get("companies"))
     return {
         "terminal": "abort" if error and not wrote else "end",
         "intent": intent,

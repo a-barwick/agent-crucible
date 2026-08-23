@@ -104,6 +104,11 @@ func primary(fs []fault.Type) fault.Type {
 }
 
 // ByFault rolls clusters up to one row per injected fault type (plus clean).
+//
+// A trial that carried three faults is counted once under each of them, so N
+// sums to more than the suite size and Rate is a co-occurrence rate, not a
+// causal one. Read a row as "trials where this fault was present completed X%
+// of the time" — to attribute cause, run the fault on its own.
 func ByFault(trials []TrialRef) []Cluster {
 	var refs []TrialRef
 	for _, t := range trials {

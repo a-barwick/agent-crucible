@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"io/fs"
 	"net/http"
 	"time"
@@ -160,8 +162,8 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 		N     int           `json:"n"`
 		Tools []schema.Tool `json:"tools"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
-		http.Error(w, "invalid json", http.StatusBadRequest)
+	if err := decodeBody(r, &req); err != nil {
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	if len(req.Tools) == 0 {
@@ -169,16 +171,32 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	writeJSON(w, http.StatusOK, ai.Generate(ctx, req.Seed, req.Tools, req.N, ai.FromEnv(ai.Config{})))
+	writeJSON(w, http.StatusOK, ai.Generate(ctx, req.Seed, req.Tools, req.N, ai.ClientFromEnv(ai.Config{})))
 }
 
+// maxBody caps a request. A pasted spec with fixtures is a few kilobytes; the
+// endpoints are otherwise happy to buffer whatever a client sends.
+const maxBody = 4 << 20
+
+// readReq decodes a run request. An empty body means "use the defaults", which
+// is why io.EOF is not an error — but it has to be recognised by comparing
+// against io.EOF, not by matching the string "EOF", which also swallowed any
+// future error whose message happened to render that way.
 func readReq(w http.ResponseWriter, r *http.Request) (runReq, bool) {
 	var req runReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
-		http.Error(w, "invalid json", http.StatusBadRequest)
+	if err := decodeBody(r, &req); err != nil {
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 		return req, false
 	}
 	return req, true
+}
+
+func decodeBody(r *http.Request, v any) error {
+	err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(v)
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	return err
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

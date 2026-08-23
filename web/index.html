@@ -12,7 +12,7 @@
     <div class="brand">
       <p class="eyebrow">Agent Crucible</p>
       <h1>Torture chamber</h1>
-      <p class="lede">Give it an agent — an unmodified LangGraph, create_react_agent, ADK module, OpenAI tools, a Node process, or a foreign script — and its tool schemas. The chamber intercepts HTTP/SDK calls and tools. The runner is deterministic. The model is not invited.</p>
+      <p class="lede">Give it an agent — an unmodified LangGraph, create_react_agent, ADK module, OpenAI tools, a Node process, or a foreign script — and its tool schemas. The chamber intercepts HTTP/SDK calls and tools. The runner is deterministic: it picks the faults, advances the clock, and scores the trial. A model only narrates what already happened.</p>
     </div>
     <div class="agent-chip" id="agent-chip">
       <span class="fw" id="agent-fw">langgraph-go</span>
@@ -51,7 +51,7 @@
   <section class="forge" aria-label="Failure probability">
     <div class="forge-copy">
       <label for="p-slider">Tool failure probability</label>
-      <p>Same seed. Same forty trials. The only thing that changes is how often a tool lies, stalls, or repeats itself.</p>
+      <p>Same seed, same trials. The only thing that changes is how often a tool lies, stalls, or repeats itself — raising this only adds faults, it never reshuffles the ones already there.</p>
     </div>
     <div class="forge-control">
       <input id="p-slider" type="range" min="0" max="30" step="1" value="0" />
@@ -81,8 +81,8 @@
       <div class="curve" id="curve" aria-hidden="true"></div>
     </article>
     <article class="tiles-wrap">
-      <p class="section-kicker">Ensemble <span id="tile-caption">trial 0–39</span></p>
-      <div class="tiles" id="tiles" role="list"></div>
+      <p class="section-kicker">Ensemble <span id="tile-caption">waiting</span></p>
+      <div class="tiles" id="tiles" role="group" aria-label="Trials in this suite"></div>
     </article>
   </section>
 

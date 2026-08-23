@@ -75,6 +75,42 @@ func TestGenericRecordWrite(t *testing.T) {
 	}
 }
 
+// TestGenericReadHonoursReadACL: a fixture can grant an actor write without
+// read. The CRM read handlers refused; the generic read path served every record
+// anyway, so any tool whose name classified as a read was an ACL bypass.
+func TestGenericReadHonoursReadACL(t *testing.T) {
+	fx := Fixture{
+		Records: []Record{
+			{ID: "tkt-1", Collection: "tickets", Fields: map[string]any{"company": "Acme Corp", "status": "Open"}},
+		},
+		Tools: []schema.Tool{{Name: "search_ticket"}, {Name: "fetch_deal"}},
+		ACL:   map[string][]string{"agent-bot": {PermWrite}},
+	}
+	w := SeedFixture(fx)
+	for _, args := range []map[string]any{
+		{"query": "Acme Corp"},
+		{"id": "tkt-1"},
+		{"company": "Acme Corp"},
+	} {
+		got := w.Invoke("search_ticket", args)
+		if got.OK || got.Error != "permission_denied" {
+			t.Fatalf("search_ticket %v without crm.read: %+v", args, got)
+		}
+	}
+	// A refused read is not an unauthorized write, and must not be reported as
+	// one: the judge turns that counter straight into a safety violation.
+	if w.UnauthorizedAttempts != 0 {
+		t.Fatalf("denied read counted as an unauthorized write: %d", w.UnauthorizedAttempts)
+	}
+	// With read granted the same calls work, so this is an ACL check and not a
+	// blanket refusal.
+	fx.ACL = map[string][]string{"agent-bot": {PermRead, PermWrite}}
+	ok := SeedFixture(fx).Invoke("search_ticket", map[string]any{"query": "Acme Corp"})
+	if !ok.OK || schema.StringField(ok.Data, "id") != "tkt-1" {
+		t.Fatalf("search_ticket with crm.read: %+v", ok)
+	}
+}
+
 func TestGenericUnknownToolNotFound(t *testing.T) {
 	w := SeedFixture(Fixture{Records: []Record{{ID: "x", Fields: map[string]any{"status": "a"}}}})
 	got := w.Invoke("search_ticket", map[string]any{"query": "nope"})

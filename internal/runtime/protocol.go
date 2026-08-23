@@ -28,6 +28,12 @@ type RunResponse struct {
 	Error      string       `json:"error,omitempty"`
 	Checkpoint bool         `json:"checkpoint"`
 	Runtime    string       `json:"runtime"`
+	// ChamberError says the sidecar could not run the trial at all: no entry
+	// file, a bad export, an unreachable callback. It is not a verdict.
+	ChamberError bool `json:"chamber_error,omitempty"`
+	// AgentError is the traceback from the agent's own code. That *is* a
+	// verdict — an agent that crashes has failed — so it travels with a 200.
+	AgentError string `json:"agent_error,omitempty"`
 }
 
 type ToolReq struct {

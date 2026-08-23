@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/a-barwick/agent-crucible/internal/cluster"
@@ -40,9 +41,12 @@ type finding struct {
 	Node     string
 	Advice   string
 	Evidence string
-	N        int
-	Rate     float64
-	Fault    fault.Type
+	// N is how many trials logged this line, not how many times it was logged.
+	// A node that records the same complaint on every retry would otherwise
+	// report more trials than the suite contains.
+	N     int
+	Rate  float64
+	Fault fault.Type
 }
 
 func Explain(ctx context.Context, in ExplainInput) critique.Critique {
@@ -65,13 +69,15 @@ func Explain(ctx context.Context, in ExplainInput) critique.Critique {
 	}
 
 	// If we have no traces yet (unit tests, empty suite), fall back to rates.
+	// "Was present on" rather than "caused": a trial can carry several faults,
+	// and ByFault attributes its outcome to each of them.
 	if len(paras) == 0 {
 		for _, c := range in.ByFault {
 			if c.Fault == "" || c.N == 0 {
 				continue
 			}
 			paras = append(paras, fmt.Sprintf(
-				"%s fired on %d trials and completed %s of the time.",
+				"%s was present on %d trials, which completed %s of the time.",
 				c.Fault.Label(), c.N, pct(c.Rate),
 			))
 		}
@@ -131,8 +137,13 @@ func mine(samples []Evidence, byFault []cluster.Cluster) []finding {
 	type key struct{ ev, node string }
 	counts := map[key]int{}
 	for _, s := range samples {
+		seen := map[key]bool{}
 		for _, ev := range s.Events {
 			k := key{ev: ev, node: nodeOf(ev)}
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
 			counts[k]++
 		}
 	}
@@ -155,14 +166,14 @@ func mine(samples []Evidence, byFault []cluster.Cluster) []finding {
 		}
 		out = append(out, f)
 	}
-	// Stable-ish: more frequent first.
-	for i := 0; i < len(out); i++ {
-		for j := i + 1; j < len(out); j++ {
-			if out[j].N > out[i].N || (out[j].N == out[i].N && out[j].Evidence < out[i].Evidence) {
-				out[i], out[j] = out[j], out[i]
-			}
+	// Most frequent first, then by evidence text so ties do not depend on map
+	// iteration order — the critique has to be identical on a replay.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].N != out[j].N {
+			return out[i].N > out[j].N
 		}
-	}
+		return out[i].Evidence < out[j].Evidence
+	})
 	if len(out) > 8 {
 		out = out[:8]
 	}

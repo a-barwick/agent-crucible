@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/a-barwick/agent-crucible/internal/scenario"
@@ -40,6 +41,30 @@ func TestGenerateCRMStillLibrary(t *testing.T) {
 	drafts := Generate(context.Background(), 3, []schema.Tool{{Name: "write_deal"}}, 3, nil)
 	if len(drafts) == 0 || drafts[0].Source != "library" {
 		t.Fatalf("CRM tools should reprint the library: %+v", drafts)
+	}
+}
+
+// The seed was drawn and discarded, so every seed returned the same first n
+// entries of the library. It has to select, and it has to replay.
+func TestGenerateSeedSelectsAndReplays(t *testing.T) {
+	ids := func(seed int64) []string {
+		var out []string
+		for _, d := range Generate(context.Background(), seed, nil, 3, nil) {
+			out = append(out, d.ID)
+		}
+		return out
+	}
+	if a, b := ids(7), ids(7); !reflect.DeepEqual(a, b) {
+		t.Fatalf("same seed gave different scenarios: %v vs %v", a, b)
+	}
+	differs := false
+	for seed := int64(0); seed < 12 && !differs; seed++ {
+		if !reflect.DeepEqual(ids(7), ids(seed)) {
+			differs = true
+		}
+	}
+	if !differs {
+		t.Fatal("no seed in 0..11 produced a different selection; the seed is being ignored")
 	}
 }
 

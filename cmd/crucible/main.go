@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/a-barwick/agent-crucible/internal/agent"
@@ -50,7 +53,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `crucible — a torture chamber for tool-using agents
 
 Usage:
-  crucible serve     [-addr :8080]
+  crucible serve     [-addr 127.0.0.1:8080]
   crucible run       [-seed 42] [-trials 40] [-p 0.3] [-agent aether-closer] [-scenario close-acme]
                      [-entry examples/native_ticket.py] [-endpoint http://127.0.0.1:8092]
                      [-spec examples/native_ticket.json] [-faults all] [-json]
@@ -67,16 +70,35 @@ AI generates scenarios, scores ambiguous traces, and explains patterns. It does 
 
 func serveCmd(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	addr := fs.String("addr", ":8080", "listen address")
+	// Loopback by default. POST /api/run runs local agent files and can reach
+	// loopback services, so this is not an API to expose by accident.
+	addr := fs.String("addr", "127.0.0.1:8080", "listen address")
 	_ = fs.Parse(args)
+	defer runtime.StopAll()
 	if rt, err := runtime.EnsureLocal(context.Background()); err != nil {
 		fmt.Fprintf(os.Stderr, "python runtime: %v (langgraph/adk agents unavailable)\n", err)
 	} else {
 		fmt.Fprintf(os.Stderr, "python runtime %s\n", rt.URL)
-		defer rt.Stop()
+	}
+	if !loopbackAddr(*addr) {
+		fmt.Fprintf(os.Stderr,
+			"warning: %s is not loopback. The run API executes agent files from this checkout and has no authentication.\n",
+			*addr)
 	}
 	h := server.New()
 	s := &http.Server{Addr: *addr, Handler: h, ReadHeaderTimeout: 5 * time.Second}
+	// Ctrl-C is how this command normally ends, and a signal does not run
+	// deferred functions. Without this the StopAll above never happens and the
+	// sidecars are left behind on their ports.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		fmt.Fprintln(os.Stderr, "\nshutting down")
+		down, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.Shutdown(down)
+	}()
 	fmt.Fprintf(os.Stderr, "crucible listening on %s\n", *addr)
 	if err := s.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintln(os.Stderr, err)
@@ -84,7 +106,22 @@ func serveCmd(args []string) {
 	}
 }
 
+func loopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func runCmd(args []string) {
+	// The sidecars live in package globals so a suite can reuse them; nothing
+	// reaps them when the command returns.
+	defer runtime.StopAll()
 	cfg, asJSON := flags(args, false)
 	timeout := 30 * time.Second
 	if agent.NeedsPython(cfg.Agent, cfg.Spec) || agent.NeedsNode(cfg.Agent, cfg.Spec) {
@@ -99,10 +136,16 @@ func runCmd(args []string) {
 		_ = enc.Encode(suite)
 		return
 	}
-	fmt.Printf("suite %s  seed=%d  trials=%d  p=%.0f%%\n", suite.ID, cfg.Seed, cfg.Trials, cfg.P*100)
-	fmt.Printf("survival %.0f%%   safety %.0f%%   clean %.0f%%\n",
-		suite.Survival*100, suite.Safety*100, suite.CleanRate*100)
-	fmt.Printf("counts %v\n\n", suite.Counts)
+	fmt.Printf("suite %s  seed=%d  trials=%d  p=%.0f%%\n", suite.ID, cfg.Seed, len(suite.Trials), cfg.P*100)
+	// Say what the percentages are over. Printing survival next to the
+	// requested trial count reads as a score over trials that never ran.
+	fmt.Printf("survival %.0f%%   safety %.0f%%   clean %.0f%%   (over %d scored)\n",
+		suite.Survival*100, suite.Safety*100, suite.CleanRate*100, suite.Scored)
+	fmt.Printf("counts %v\n", suite.Counts)
+	if suite.Errored > 0 {
+		fmt.Printf("\n%d of %d trials could not run: %s\n", suite.Errored, len(suite.Trials), suite.Error)
+	}
+	fmt.Println()
 	fmt.Println(suite.Critique.Headline)
 	for _, p := range suite.Critique.Paragraphs {
 		fmt.Println()
@@ -121,6 +164,7 @@ func runCmd(args []string) {
 }
 
 func replayCmd(args []string) {
+	defer runtime.StopAll()
 	fs := flag.NewFlagSet("replay", flag.ExitOnError)
 	seed := fs.Int64("seed", 42, "suite seed")
 	trials := fs.Int("trials", 40, "suite size (for stream mixing)")
@@ -143,6 +187,10 @@ func replayCmd(args []string) {
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(tr)
 		return
+	}
+	if tr.Error != "" {
+		fmt.Fprintf(os.Stderr, "trial %d could not run: %s\n", tr.N, tr.Error)
+		os.Exit(1)
 	}
 	fmt.Printf("trial %d  %s  %s\n", tr.N, tr.Outcome, tr.Reason)
 	if len(tr.Faults) > 0 {
@@ -203,21 +251,19 @@ func attachDropIn(cfg harness.Config, specFile, entry, endpoint string) harness.
 		if agent.JSEntry(entry) {
 			rt = "js"
 		}
-		if cfg.Bundle != nil {
-			cfg.Bundle.Spec.Entry = entry
-			if cfg.Bundle.Spec.Runtime == "" {
-				cfg.Bundle.Spec.Runtime = rt
-			}
-		} else {
-			spec := agent.Spec{Entry: entry, Runtime: rt}
-			if cfg.Spec != nil {
-				spec = *cfg.Spec
-				spec.Entry = entry
-				if spec.Runtime == "" {
-					spec.Runtime = rt
-				}
-			}
-			cfg.Spec = &spec
+		var target *agent.Spec
+		switch {
+		case cfg.Bundle != nil:
+			target = &cfg.Bundle.Spec
+		case cfg.Spec != nil:
+			target = cfg.Spec
+		default:
+			cfg.Spec = &agent.Spec{}
+			target = cfg.Spec
+		}
+		target.Entry = entry
+		if target.Runtime == "" {
+			target.Runtime = rt
 		}
 		if cfg.Agent == agent.IDCloser {
 			cfg.Agent = agent.IDPasted
@@ -264,7 +310,7 @@ func generateCmd(args []string) {
 	_ = fs.Parse(args)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	out := ai.Generate(ctx, *seed, agent.CRMTools(), *n, ai.FromEnv(ai.Config{}))
+	out := ai.Generate(ctx, *seed, agent.CRMTools(), *n, ai.ClientFromEnv(ai.Config{}))
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -276,6 +322,9 @@ func generateCmd(args []string) {
 	}
 }
 
+// parseFaults rejects names that are not in the catalog. Accepting them
+// silently meant `-faults timout` ran with no faults at all and reported a
+// perfect survival rate.
 func parseFaults(s string) []fault.Type {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -284,13 +333,33 @@ func parseFaults(s string) []fault.Type {
 	if s == "all" {
 		return append([]fault.Type(nil), fault.All...)
 	}
+	if s == "mvp" {
+		return append([]fault.Type(nil), fault.MVP...)
+	}
+	known := map[fault.Type]bool{}
+	for _, t := range fault.All {
+		known[t] = true
+	}
 	var out []fault.Type
 	for _, p := range strings.Split(s, ",") {
 		p = strings.TrimSpace(p)
 		if p == "" {
 			continue
 		}
-		out = append(out, fault.Type(p))
+		ft := fault.Type(p)
+		if !known[ft] {
+			fmt.Fprintf(os.Stderr, "unknown fault %q; known faults are %s (or 'all', 'mvp')\n", p, faultNames())
+			os.Exit(2)
+		}
+		out = append(out, ft)
 	}
 	return out
+}
+
+func faultNames() string {
+	names := make([]string, len(fault.All))
+	for i, t := range fault.All {
+		names[i] = string(t)
+	}
+	return strings.Join(names, ", ")
 }

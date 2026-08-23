@@ -318,7 +318,14 @@ func (w *World) WriteDeal(id, status string, amount int, closeDate, ownerID stri
 	return schema.Result{OK: true, Data: dealData(d)}
 }
 
+// SendEmail is a side effect on the outside world, so it needs the same write
+// permission a CRM mutation does. Without the check a revoked actor could not
+// close a deal but could still tell the customer it had closed.
 func (w *World) SendEmail(to, subject, body string) schema.Result {
+	if !w.Can(w.Actor, PermWrite) {
+		w.UnauthorizedAttempts++
+		return schema.Result{OK: false, Error: "permission_denied"}
+	}
 	if to == "" {
 		return schema.Result{OK: false, Error: "invalid_recipient"}
 	}
@@ -502,7 +509,15 @@ func (w *World) writeRecord(args map[string]any) schema.Result {
 	return schema.Result{OK: true, Data: rec.asData()}
 }
 
+// readRecord serves the generic read tools. It checks crm.read for the same
+// reason LookupContact does: a fixture that grants an actor only crm.write
+// otherwise still let it read every deal and record through any tool whose name
+// happened to classify as a read. A denied read does not touch
+// UnauthorizedAttempts, which the judge reads as an unauthorized *write*.
 func (w *World) readRecord(args map[string]any) schema.Result {
+	if !w.Can(w.Actor, PermRead) {
+		return schema.Result{OK: false, Error: "permission_denied"}
+	}
 	if rec, ok := w.matchRecord(args); ok {
 		return schema.Result{OK: true, Data: rec.asData()}
 	}

@@ -112,6 +112,45 @@ func TestUnknownScenarioIDUsesExtra(t *testing.T) {
 	}
 }
 
+// TestUnknownScenarioIDIsRefused: an id that names nothing used to fall through
+// to close-acme while the suite still reported the id that was asked for, so a
+// typo ran the Acme deal-close task and the numbers were filed under a task
+// that never ran.
+func TestUnknownScenarioIDIsRefused(t *testing.T) {
+	s := Run(context.Background(), Config{
+		Seed: 3, Trials: 3, P: 0, Scenario: "gen-resolve-primary", Faults: fault.MVP,
+	})
+	if s.Scored != 0 || s.Errored != 3 {
+		t.Fatalf("scored=%d errored=%d, want 0 scored and 3 errored", s.Scored, s.Errored)
+	}
+	if !contains(s.Error, "unknown scenario") || !contains(s.Error, "close-acme") {
+		t.Fatalf("error should name the problem and the valid ids, got %q", s.Error)
+	}
+	// Survival is over scored trials, so a bad id must not read as a fragile
+	// agent.
+	if s.Survival != 0 || s.Counts[string(judge.OutcomeFailed)] != 0 {
+		t.Fatalf("survival %v counts %v", s.Survival, s.Counts)
+	}
+}
+
+// TestSuiteNamesTheScenarioThatRan: a drop-in agent asked for close-acme runs
+// the ticket task. The suite used to report the request.
+func TestSuiteNamesTheScenarioThatRan(t *testing.T) {
+	s := Run(context.Background(), Config{
+		Seed: 3, Trials: 2, P: 0, Agent: agent.IDNativeJS,
+		Scenario: scenario.CloseAcmeID, Faults: fault.MVP,
+	})
+	if s.Scenario != scenario.TicketID {
+		t.Fatalf("suite reported scenario %q, but a drop-in runs %q", s.Scenario, scenario.TicketID)
+	}
+	// And the reported id has to resolve back to the same scenario, or the
+	// replay line the UI prints from it would run something else.
+	back, err := resolveScenario(Config{Agent: agent.IDNativeJS, Scenario: s.Scenario})
+	if err != nil || back.ID != scenario.TicketID {
+		t.Fatalf("reported id does not round-trip: %+v %v", back.ID, err)
+	}
+}
+
 func TestLangGraphPastedTicket(t *testing.T) {
 	if !runtime.HaveLangGraph() {
 		t.Skip("langgraph not installed")

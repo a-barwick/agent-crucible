@@ -19,13 +19,19 @@ const (
 )
 
 // Info is what the UI lists without constructing a graph.
+//
+// Aliases are other ids that resolve to this same agent. They stay accepted by
+// the API so older links and scripts keep working, but they are not listed
+// separately: two catalog rows pointing at one file read as two agents to
+// compare, and there is nothing to compare.
 type Info struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Framework   string `json:"framework"`
-	Runtime     string `json:"runtime"`
-	Description string `json:"description"`
-	Available   bool   `json:"available"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Framework   string   `json:"framework"`
+	Runtime     string   `json:"runtime"`
+	Description string   `json:"description"`
+	Available   bool     `json:"available"`
+	Aliases     []string `json:"aliases,omitempty"`
 }
 
 // Catalog is the drop-in list. pythonReady means the Python sidecar is up.
@@ -53,23 +59,13 @@ func Catalog(pythonReady, nodeReady bool) []Info {
 		},
 		{
 			ID: IDTicketLangGraph, Name: "ticket-bot", Framework: "langgraph",
-			Runtime: "python", Available: pythonReady,
+			Runtime: "python", Available: pythonReady, Aliases: []string{IDNativeLangGraph},
 			Description: "Unmodified LangGraph: @tool functions the chamber intercepts. No cb.retry_tool.",
 		},
 		{
 			ID: IDTicketADK, Name: "ticket-bot", Framework: "adk",
-			Runtime: "python", Available: pythonReady,
+			Runtime: "python", Available: pythonReady, Aliases: []string{IDNativeADK},
 			Description: "Unmodified ADK agent: FunctionTool + LlmAgent. Chamber wraps the functions.",
-		},
-		{
-			ID: IDNativeLangGraph, Name: "ticket-bot", Framework: "langgraph",
-			Runtime: "python", Available: pythonReady,
-			Description: "Same unmodified LangGraph as ticket-langgraph (examples/native_ticket.py).",
-		},
-		{
-			ID: IDNativeADK, Name: "ticket-bot", Framework: "adk",
-			Runtime: "python", Available: pythonReady,
-			Description: "Same unmodified ADK agent as ticket-adk (examples/native_adk.py).",
 		},
 		{
 			ID: IDNativeOpenAI, Name: "ticket-bot", Framework: "openai",

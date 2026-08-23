@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +20,16 @@ import (
 var (
 	procMu sync.Mutex
 	live   *Proc
+
+	probeMu     sync.Mutex
+	langgraphOK bool
+	probedAt    time.Time
 )
+
+// probeTTL is how long a dependency probe is trusted. Long enough that listing
+// the agent catalog does not fork Python once per row, short enough that a pip
+// install during a serve session is picked up.
+const probeTTL = 30 * time.Second
 
 type Proc struct {
 	URL    string
@@ -36,12 +46,26 @@ func (p *Proc) Stop() {
 	}
 	if p.cmd != nil && p.cmd.Process != nil {
 		_ = p.cmd.Process.Kill()
+		// Reap it. Without the Wait the killed sidecar lingers as a zombie for
+		// as long as the CLI runs.
+		_ = p.cmd.Wait()
 	}
 }
 
+// HaveLangGraph reports whether the Python sidecar's dependencies are
+// importable. The answer is cached: this forks a Python interpreter, and it is
+// called once per agent when rendering the catalog and once per status poll.
 func HaveLangGraph() bool {
-	cmd := exec.Command("python3", "-c", "import langgraph, langchain_core")
-	return cmd.Run() == nil
+	probeMu.Lock()
+	defer probeMu.Unlock()
+	if !probedAt.IsZero() && time.Since(probedAt) < probeTTL {
+		return langgraphOK
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	langgraphOK = exec.CommandContext(ctx, "python3", "-c", "import langgraph, langchain_core").Run() == nil
+	probedAt = time.Now()
+	return langgraphOK
 }
 
 func FindDir() string {
@@ -94,7 +118,12 @@ func EnsureLocal(ctx context.Context) (*Proc, error) {
 	}
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	pctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(pctx, "python3", "-m", "crucible_rt", "serve", "--addr", addr)
+	// --parent-pid: Stop() below is the normal way a sidecar dies, but a
+	// SIGKILL or a panic never reaches it, and an orphaned sidecar sits on its
+	// port for the life of the machine. Told who its parent is, it leaves when
+	// we do.
+	cmd := exec.CommandContext(pctx, "python3", "-m", "crucible_rt", "serve",
+		"--addr", addr, "--parent-pid", strconv.Itoa(os.Getpid()))
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "PYTHONPATH="+dir)
 	stdout, _ := cmd.StdoutPipe()
@@ -122,6 +151,32 @@ func EnsureLocal(ctx context.Context) (*Proc, error) {
 	cancel()
 	_ = cmd.Process.Kill()
 	return nil, fmt.Errorf("python runtime did not become healthy on %s", url)
+}
+
+// StopAll kills every sidecar this process started. Commands that exit after a
+// suite must call it: EnsureLocal/EnsureNode keep the child alive in a package
+// global, so without this a `crucible run` leaves a Python server behind.
+func StopAll() {
+	procMu.Lock()
+	if live != nil {
+		live.Stop()
+		live = nil
+	}
+	procMu.Unlock()
+
+	nodeMu.Lock()
+	if liveNode != nil {
+		liveNode.Stop()
+		liveNode = nil
+	}
+	nodeMu.Unlock()
+
+	sharedCbMu.Lock()
+	if sharedCb != nil {
+		sharedCb.Close()
+		sharedCb = nil
+	}
+	sharedCbMu.Unlock()
 }
 
 func CurrentStatus() Status {

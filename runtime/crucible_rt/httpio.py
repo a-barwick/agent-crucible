@@ -8,6 +8,12 @@ never intercepted.
 
 URL → tool mapping uses spec.tools[].http when present, then the
 current wrapped tool name, then host/path heuristics.
+
+The library patches are process-wide and installed once. Which chamber a
+patched call routes to is per-run: a session is registered for the thread
+that installs it, and a thread the agent spawns resolves to it as long as
+only one run is in flight. Two concurrent runs each keep their own tool
+names, hit counts and snapshot, so one trial cannot read another's writes.
 """
 
 from __future__ import annotations
@@ -24,28 +30,86 @@ from typing import Any
 
 _lock = threading.Lock()
 _tls = threading.local()
-_state = threading.local()
 
-_cb = None
-_spec: dict = {}
 _installed = False
 _orig_urlopen = None
 _orig_import = None
 _patched: set[str] = set()
-_hits = 0
-_last: dict | None = None
+
+# Sessions in flight, keyed by the thread that installed them, and every
+# callback base URL we have ever been handed. The URL set outlives the session
+# on purpose: a worker thread with no session of its own must still recognise
+# the chamber's own endpoints, or its callback POST would be intercepted as if
+# it were a tool call and recurse.
+_sessions: dict[int, "_Session"] = {}
+_bases: set[str] = set()
+
+
+class _Session:
+    def __init__(self, cb, spec: dict | None):
+        self.cb = cb
+        self.spec = spec or {}
+        self.hits = 0
+        self.last: dict | None = None
+        self.store = _empty_store()
+
+
+def _empty_store() -> dict:
+    return {"calls": [], "wrote": False, "record_id": "", "status": "", "error": ""}
+
+
+def _session() -> "_Session | None":
+    s = _sessions.get(threading.get_ident())
+    if s is not None:
+        return s
+    # A thread the agent spawned. With one run in flight there is no ambiguity
+    # about which chamber it belongs to; with several there is, and guessing
+    # would credit one trial's write to another.
+    with _lock:
+        if len(_sessions) == 1:
+            return next(iter(_sessions.values()))
+    return None
 
 
 def active() -> bool:
-    return _installed and _cb is not None
+    return _installed and _session() is not None
+
+
+def _guard(url: Any) -> None:
+    """Refuse a call this process cannot attribute to a trial.
+
+    A thread the agent spawned has no session of its own. With one run in flight
+    _session falls back to it; with several, there is nothing to fall back to, and
+    the call used to be forwarded to the real network — a scored trial reaching
+    the internet, and a write nobody could see in the trace. This is the chamber
+    failing to contain the run, so it is raised as a chamber error rather than
+    handed to the agent as a tool failure.
+    """
+    if not _installed or _session() is not None or is_passthrough(str(url)):
+        return
+    with _lock:
+        n = len(_sessions)
+    if n < 2:
+        # Nothing is running: no trial to attribute this to and no verdict to
+        # corrupt, so it is left alone.
+        return
+    from .callback import CallbackError
+
+    raise CallbackError(
+        f"cannot tell which trial this call belongs to: {n} runs are in flight and "
+        f"the thread that made it registered none. Refusing to send it to the real "
+        f"network ({str(url)[:120]})"
+    )
 
 
 def hits() -> int:
-    return _hits
+    s = _session()
+    return s.hits if s else 0
 
 
 def last_result() -> dict | None:
-    return _last
+    s = _session()
+    return s.last if s else None
 
 
 def current_tool() -> str | None:
@@ -63,52 +127,53 @@ def using_tool(name: str):
 
 
 def snapshot() -> dict:
-    store = _store()
+    s = _session()
+    store = s.store if s else _empty_store()
     return {
         "calls": list(store.get("calls") or []),
         "wrote": bool(store.get("wrote")),
         "record_id": store.get("record_id") or "",
         "status": store.get("status") or "",
         "error": store.get("error") or "",
-        "hits": _hits,
+        "hits": s.hits if s else 0,
     }
 
 
 def reset_snapshot() -> None:
-    _state.store = {"calls": [], "wrote": False, "record_id": "", "status": "", "error": ""}
+    s = _session()
+    if s is not None:
+        s.store = _empty_store()
+        s.hits = 0
+        s.last = None
 
 
 def _store() -> dict:
-    s = getattr(_state, "store", None)
-    if s is None:
-        s = {"calls": [], "wrote": False, "record_id": "", "status": "", "error": ""}
-        _state.store = s
-    return s
+    s = _session()
+    return s.store if s else _empty_store()
 
 
 def is_passthrough(url: str) -> bool:
     if not url:
         return False
-    cb = _cb
-    base = getattr(cb, "url", "") if cb is not None else ""
-    if base and str(url).startswith(str(base).rstrip("/")):
-        return True
-    low = str(url).lower()
-    if "/before_node" in low or low.endswith("/tool") or "/v1/run" in low:
-        if "127.0.0.1" in low or "localhost" in low:
+    text = str(url)
+    for base in tuple(_bases):
+        if base and text.startswith(base):
+            return True
+    low = text.lower()
+    if "/before_node" in low or low.endswith("/tool") or "/state" in low or "/v1/run" in low:
+        if "127.0.0.1" in low or "localhost" in low or "[::1]" in low:
             return True
     return False
 
 
 def install(cb, spec: dict | None = None) -> None:
     """Patch HTTP/SDK libraries so they call into FaultBus."""
-    global _cb, _spec, _installed, _orig_urlopen, _orig_import, _hits, _last
-    _cb = cb
-    _spec = spec or {}
-    _hits = 0
-    _last = None
-    reset_snapshot()
+    global _installed, _orig_urlopen, _orig_import
+    base = str(getattr(cb, "url", "") or "").rstrip("/")
     with _lock:
+        _sessions[threading.get_ident()] = _Session(cb, spec)
+        if base:
+            _bases.add(base)
         if _installed:
             _patch_optional()
             return
@@ -161,17 +226,35 @@ def install_from_env(cb=None, spec: dict | None = None) -> None:
             pass
 
 
+def clear() -> None:
+    """Drop this thread's session, leaving the library patches in place.
+
+    A run ends by clearing, not uninstalling: the patched functions are shared
+    with any other run in flight, and restoring the originals under it would let
+    its next tool call out onto the real network.
+    """
+    with _lock:
+        _sessions.pop(threading.get_ident(), None)
+
+
 def uninstall() -> None:
-    global _installed, _cb, _orig_urlopen, _orig_import
+    """Restore the real libraries. Only safe when no run is in flight.
+
+    _patched is deliberately not cleared. The optional-library patches replace a
+    method with a closure over the previous one, so re-patching an already
+    patched method stacks another layer on every install — forty trials, forty
+    nested wrappers.
+    """
+    global _installed, _orig_urlopen, _orig_import
     with _lock:
         if _orig_urlopen is not None:
             urllib.request.urlopen = _orig_urlopen
+            _orig_urlopen = None
         if _orig_import is not None:
             builtins.__import__ = _orig_import
             _orig_import = None
         _installed = False
-        _cb = None
-        _patched.clear()
+        _sessions.clear()
 
 
 def _import(name, globals=None, locals=None, fromlist=(), level=0):
@@ -190,19 +273,19 @@ def _patch_optional() -> None:
 
 def dispatch(method: str, url: str, headers: dict | None = None, body: Any = None) -> tuple[int, dict]:
     """Map one HTTP call onto FaultBus and return (status, json body)."""
-    global _hits, _last
-    tool, args = map_request(method, url, body, _spec)
-    cb = _cb
-    if cb is None:
+    sess = _session()
+    tool, args = map_request(method, url, body, sess.spec if sess else {})
+    if sess is None or sess.cb is None:
         raise RuntimeError(f"live call to {url} was not intercepted: {args}")
+    cb = sess.cb
     if current_tool() is None and hasattr(cb, "before"):
         try:
             cb.before(tool)
         except Exception:
             pass
     res = cb.tool(tool, args) if hasattr(cb, "tool") else {"ok": False, "error": "no_callback"}
-    _hits += 1
-    _last = res
+    sess.hits += 1
+    sess.last = res
     _note(tool, args, res)
     _emit(cb, tool, res)
     from .intercept import present
@@ -442,7 +525,10 @@ class _Headers(dict):
         return "utf-8"
 
 
-def _urlopen(url, data=None, timeout=None, *args, **kwargs):
+_SENTINEL = object()
+
+
+def _urlopen(url, data=None, timeout=_SENTINEL, *args, **kwargs):
     if isinstance(url, urllib.request.Request):
         method = url.get_method()
         full = url.full_url
@@ -452,8 +538,15 @@ def _urlopen(url, data=None, timeout=None, *args, **kwargs):
         method = "GET" if data is None else "POST"
         full = str(url)
         headers = {}
-    if is_passthrough(full) and _orig_urlopen is not None:
-        return _orig_urlopen(url, data=data, timeout=timeout, *args, **kwargs)
+    _guard(full)
+    if _orig_urlopen is not None and (is_passthrough(full) or not active()):
+        # Forward positionally and only pass timeout when the caller did.
+        # `_orig(url, data=data, timeout=timeout, *args)` looks like it forwards
+        # everything and in fact binds args to data, and defaulting timeout to
+        # None turns urlopen's default into "block forever".
+        if timeout is _SENTINEL:
+            return _orig_urlopen(url, data, *args, **kwargs)
+        return _orig_urlopen(url, data, timeout, *args, **kwargs)
     status, payload = dispatch(method, full, headers, data)
     raw = json.dumps(payload).encode()
     if status >= 400:
@@ -471,9 +564,13 @@ def _patch_requests() -> None:
     except Exception:
         return
     orig = requests.sessions.Session.request
+    if getattr(orig, "_crucible_patched", False):
+        _patched.add("requests")
+        return
 
     def request(session, method, url, **kwargs):
-        if is_passthrough(str(url)):
+        _guard(url)
+        if not active() or is_passthrough(str(url)):
             return orig(session, method, url, **kwargs)
         body = kwargs.get("json")
         if body is None:
@@ -483,6 +580,7 @@ def _patch_requests() -> None:
         status, payload = dispatch(method, str(url), kwargs.get("headers"), body)
         return _requests_response(requests, status, payload, str(url))
 
+    request._crucible_patched = True  # type: ignore[attr-defined]
     requests.sessions.Session.request = request  # type: ignore[assignment]
     _patched.add("requests")
 
@@ -506,30 +604,39 @@ def _patch_httpx() -> None:
         import httpx
     except Exception:
         return
+    orig_sync = httpx.Client.send
+    if getattr(orig_sync, "_crucible_patched", False):
+        _patched.add("httpx")
+        return
 
     def _send(self, request, **kwargs):
         url = str(request.url)
-        if is_passthrough(url):
-            return _orig_httpx_send(self, request, **kwargs)
+        _guard(url)
+        if not active() or is_passthrough(url):
+            return orig_sync(self, request, **kwargs)
         status, payload = dispatch(request.method, url, dict(request.headers), request.content)
         return httpx.Response(status, json=payload, request=request)
 
     try:
-        _orig_httpx_send = httpx.Client.send
+        _send._crucible_patched = True  # type: ignore[attr-defined]
         httpx.Client.send = _send  # type: ignore[assignment]
         _patched.add("httpx")
     except Exception:
         return
     try:
         orig_async = httpx.AsyncClient.send
+        if getattr(orig_async, "_crucible_patched", False):
+            return
 
         async def _asend(self, request, **kwargs):
             url = str(request.url)
-            if is_passthrough(url):
+            _guard(url)
+            if not active() or is_passthrough(url):
                 return await orig_async(self, request, **kwargs)
             status, payload = dispatch(request.method, url, dict(request.headers), request.content)
             return httpx.Response(status, json=payload, request=request)
 
+        _asend._crucible_patched = True  # type: ignore[attr-defined]
         httpx.AsyncClient.send = _asend  # type: ignore[assignment]
     except Exception:
         pass
@@ -545,8 +652,12 @@ def _patch_salesforce() -> None:
     SF = getattr(simple_salesforce, "Salesforce", None)
     if SF is None or getattr(SF, "_crucible_patched", False):
         return
+    orig_query = getattr(SF, "query", None)
+    orig_restful = getattr(SF, "restful", None)
 
     def query(self, q, *a, **k):
+        if not active() and callable(orig_query):
+            return orig_query(self, q, *a, **k)
         status, payload = dispatch("GET", "https://example.my.salesforce.com/services/data/v59.0/query", None, {"q": q, "query": q})
         if "records" not in payload:
             rec = {k: v for k, v in payload.items() if k not in ("ok", "error")}
@@ -554,13 +665,15 @@ def _patch_salesforce() -> None:
         return payload
 
     def restful(self, path="", method="GET", params=None, **kwargs):
+        if not active() and callable(orig_restful):
+            return orig_restful(self, path, method, params, **kwargs)
         url = "https://example.my.salesforce.com/services/data/v59.0/" + str(path or "")
         status, payload = dispatch(method, url, None, params or kwargs.get("json") or kwargs.get("data"))
         return payload
 
     try:
         SF.query = query
-        if hasattr(SF, "restful"):
+        if orig_restful is not None:
             SF.restful = restful
         SF._crucible_patched = True  # type: ignore[attr-defined]
         _patched.add("simple_salesforce")
@@ -572,13 +685,19 @@ def _patch_salesforce() -> None:
         SFType = getattr(simple_salesforce, "SFType", None)
         if SFType is None:
             return
+        orig_get = getattr(SFType, "get", None)
+        orig_update = getattr(SFType, "update", None)
 
         def get(self, record_id, *a, **k):
+            if not active() and callable(orig_get):
+                return orig_get(self, record_id, *a, **k)
             url = f"https://example.my.salesforce.com/services/data/v59.0/sobjects/{getattr(self, 'name', 'Ticket')}/{record_id}"
             _, payload = dispatch("GET", url, None, {"id": record_id})
             return payload
 
         def update(self, record_id, data=None, *a, **k):
+            if not active() and callable(orig_update):
+                return orig_update(self, record_id, data, *a, **k)
             body = dict(data or {})
             body.setdefault("id", record_id)
             url = f"https://example.my.salesforce.com/services/data/v59.0/sobjects/{getattr(self, 'name', 'Ticket')}/{record_id}"

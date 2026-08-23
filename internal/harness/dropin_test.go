@@ -16,6 +16,16 @@ import (
 	"github.com/a-barwick/agent-crucible/internal/scenario"
 )
 
+// TestMain reaps the sidecars the drop-in tests start. They live in package
+// globals so a suite can reuse them, and nothing else tears them down, so a
+// bare `go test ./...` used to leave a Python server and a Node server running
+// per package for as long as the shell did.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	runtime.StopAll()
+	os.Exit(code)
+}
+
 func TestTicketLangGraphClean(t *testing.T) {
 	if !runtime.HaveLangGraph() {
 		t.Skip("langgraph not installed")
@@ -274,11 +284,14 @@ func TestNativeJSClean(t *testing.T) {
 	s := Run(context.Background(), Config{
 		Seed: 3, Trials: 2, P: 0, Agent: agent.IDNativeJS, Faults: fault.MVP,
 	})
+	if s.Errored > 0 {
+		t.Fatalf("node sidecar could not run %d/%d trials: %s", s.Errored, len(s.Trials), s.Error)
+	}
 	if s.Survival != 1 {
-		t.Fatalf("native js survival %v counts=%v", s.Survival, s.Counts)
 		for _, tr := range s.Trials {
 			t.Logf("trial %d %s %s %v", tr.N, tr.Outcome, tr.Reason, tr.Violations)
 		}
+		t.Fatalf("native js survival %v counts=%v", s.Survival, s.Counts)
 	}
 }
 

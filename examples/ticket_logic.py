@@ -111,9 +111,23 @@ def http_json(method: str, url: str, params: dict | None = None, body: dict | No
         parsed.setdefault("ok", False)
         return parsed
     except Exception as e:
+        # A chamber that cannot be reached is not a tool failure. Reporting it as
+        # one let a broken harness be scored as this agent mishandling a tool, so
+        # it has to propagate. Checked lazily, because these helpers are also
+        # meant to run outside the chamber, where crucible_rt is not importable.
+        if _is_chamber_error(e):
+            raise
         text = str(e).lower()
         err = "timeout" if "time" in text or "timeout" in type(e).__name__.lower() else "unavailable"
         return {"ok": False, "error": err}
+
+
+def _is_chamber_error(e: BaseException) -> bool:
+    try:
+        from crucible_rt.callback import CallbackError
+    except Exception:
+        return False
+    return isinstance(e, CallbackError)
 
 
 def note(message: str, data: dict | None = None) -> None:

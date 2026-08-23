@@ -64,6 +64,45 @@ func TestRemoteAgainstMockSidecar(t *testing.T) {
 	}
 }
 
+// TestEndpointPathIsNotDoubled: an endpoint is documented as a server speaking
+// POST /v1/run, so pasting that URL in full is the obvious thing to do. The
+// client used to append the path regardless and ask for /v1/run/v1/run.
+func TestEndpointPathIsNotDoubled(t *testing.T) {
+	var paths []string
+	sidec := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path != "/v1/run" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(RunResponse{Terminal: "end", Runtime: "mock", Steps: 1})
+	}))
+	defer sidec.Close()
+
+	for _, given := range []string{sidec.URL, sidec.URL + "/", sidec.URL + "/v1/run", sidec.URL + "/v1/run/"} {
+		paths = nil
+		ag, err := NewRemote(context.Background(), RemoteOpts{Kind: "langgraph", URL: given})
+		if err != nil {
+			t.Fatalf("%s: %v", given, err)
+		}
+		clk := clock.New()
+		tr := trace.New()
+		rec := tr.Recorder(clk.Now)
+		bus := &agent.FaultBus{
+			World: world.SeedCloseAcme(),
+			Inj:   fault.New(rng.Stream(1, 0), 0, fault.MVP),
+			Rec:   rec, Clock: clk,
+		}
+		st := agent.State{Objective: agent.DefaultObjective, ThreadID: "mock"}
+		if _, err := ag.Run(context.Background(), st, bus, rec, nil); err != nil {
+			t.Fatalf("%s: %v", given, err)
+		}
+		if len(paths) != 1 || paths[0] != "/v1/run" {
+			t.Fatalf("endpoint %q asked for %v, want [/v1/run]", given, paths)
+		}
+	}
+}
+
 func TestToolCallbackHitsWorld(t *testing.T) {
 	cb, err := NewCallback()
 	if err != nil {

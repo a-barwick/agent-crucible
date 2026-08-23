@@ -35,12 +35,14 @@ func (w *Wrap) Spec() agent.Spec {
 }
 
 func (w *Wrap) Run(ctx context.Context, st agent.State, bus agent.Bus, rec *trace.Recorder, hook agent.Hook) (agent.Result, error) {
-	cb, err := NewCallback()
+	cb, err := Shared()
 	if err != nil {
 		return agent.Result{}, err
 	}
-	defer cb.Close()
-	tok := newToken()
+	tok, err := newToken()
+	if err != nil {
+		return agent.Result{}, err
+	}
 	cb.Register(tok, &Session{Ctx: ctx, Bus: bus, Hook: hook, Rec: rec, St: &st})
 	defer cb.Unregister(tok)
 
@@ -124,6 +126,9 @@ func (w *Wrap) Run(ctx context.Context, st agent.State, bus agent.Bus, rec *trac
 	}, nil
 }
 
+// wrapScript picks the Python file out of spec.command. The command is not
+// handed to a shell, and the file has to resolve inside the runtime's roots:
+// spec.command arrives over HTTP, and this ends in python3 executing it.
 func wrapScript(spec *agent.Spec) (string, error) {
 	if spec == nil {
 		return "", fmt.Errorf("empty wrap spec")
@@ -134,17 +139,15 @@ func wrapScript(spec *agent.Spec) (string, error) {
 	}
 	for _, f := range strings.Fields(cand) {
 		if strings.HasSuffix(f, ".py") {
-			p := FindEntry(f)
-			if fileExists(p) {
+			if p, err := ResolveEntry(f); err == nil {
 				return p, nil
 			}
 		}
 	}
-	p := FindEntry(cand)
-	if fileExists(p) {
+	if p, err := ResolveEntry(cand); err == nil {
 		return p, nil
 	}
-	return "", fmt.Errorf("wrap script not found: %s", cand)
+	return "", fmt.Errorf("wrap script not found under the working tree or examples/: %s", cand)
 }
 
 func indexJSON(b []byte) int {

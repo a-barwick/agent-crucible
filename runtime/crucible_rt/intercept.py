@@ -31,6 +31,10 @@ def bind_cb(cb) -> None:
     _tls.cb = cb
 
 
+def clear_cb() -> None:
+    _tls.cb = None
+
+
 def is_langchain_tool(obj: Any) -> bool:
     if obj is None or inspect.isclass(obj):
         return False
@@ -114,42 +118,132 @@ def _emit_evidence(cb, name: str, res: dict) -> None:
     err = (res or {}).get("error") or ""
     data = (res or {}).get("data")
     empty = data is None or data == {} or data == []
-    if err == "permission_denied":
-        cb.state("write ignored permission_denied", {"tool": name})
-    if (res or {}).get("ok") and empty and _writeish(name):
-        cb.state("write accepted empty success payload", {"tool": name})
+    # Evidence is a side note. If the chamber cannot be reached the tool result
+    # still stands, and raising here would turn a lost log line into a failure.
+    try:
+        if err == "permission_denied":
+            cb.state("write ignored permission_denied", {"tool": name})
+        if (res or {}).get("ok") and empty and _writeish(name):
+            cb.state("write accepted empty success payload", {"tool": name})
+    except Exception:
+        pass
 
 
-def wrap_callable(fn, name: str, cb):
+def _enter(fn, name: str, cb, args, kwargs):
+    """Common preamble. Returns the chamber, the bound args, and the I/O count
+    to compare against afterwards (None when nothing is intercepting).
+
+    The chamber is resolved at call time, not at wrap time. A tool object that
+    lives in a module the entry file imports is wrapped once and cached by
+    sys.modules for the whole suite; a captured callback would send every later
+    trial's tool calls to the first trial's bus and token.
+    """
+    from . import httpio
+
+    chamber = current_cb() or cb
+    payload = _bind_args(fn, args, kwargs)
+    if hasattr(chamber, "before"):
+        chamber.before(name)
+    return chamber, payload, (httpio.hits() if httpio.active() else None)
+
+
+def _body_raised(chamber, name: str, before, exc: BaseException) -> None:
+    """The tool's body raised. Re-raise if its own I/O was already under way;
+    otherwise note it, because silently substituting a synthetic success made
+    the agent's own crash invisible in the timeline and scored the trial as
+    though the tool had worked."""
+    from . import httpio
+    from .callback import CallbackError
+
+    if before is not None and httpio.hits() > before:
+        raise exc
+    # A failure to reach the chamber is never the agent's verdict, and the
+    # chamber cannot answer in its place either. The JS wrapper already did this.
+    if isinstance(exc, CallbackError):
+        raise exc
+    if hasattr(chamber, "state"):
+        try:
+            chamber.state(
+                "tool body raised before any I/O; chamber answered instead",
+                {"tool": name, "error": f"{type(exc).__name__}: {exc}"},
+            )
+        except Exception:
+            pass
+
+
+def _body_answered(before, out):
+    """(handled, value): did the body reach the chamber through httpio itself?"""
+    from . import httpio
+
+    if before is None or httpio.hits() <= before:
+        return False, None
+    return True, out if out is not None else present(httpio.last_result() or {})
+
+
+def _chamber_answer(chamber, name: str, payload: dict):
+    res = chamber.tool(name, payload) if hasattr(chamber, "tool") else {}
+    _emit_evidence(chamber, name, res)
+    return present(res)
+
+
+def _mark(wrapped, fn, name: str):
+    wrapped._crucible_wrapped = True
+    wrapped._crucible_name = name
+    wrapped.__name__ = getattr(fn, "__name__", name)
+    wrapped.__doc__ = getattr(fn, "__doc__", "") or ""
+    return wrapped
+
+
+def wrap_callable(fn, name: str, cb=None):
     if fn is None or getattr(fn, "_crucible_wrapped", False):
         return fn
+    # An async tool body has to be awaited. Calling it from a sync wrapper only
+    # built a coroutine object, so the body never ran, no I/O was recorded, and
+    # every async tool fell through to the chamber's synthetic answer.
+    if inspect.iscoroutinefunction(fn):
+        return wrap_coroutine(fn, name, cb)
 
     def wrapped(*args, **kwargs):
         from . import httpio
 
-        payload = _bind_args(fn, args, kwargs)
-        if hasattr(cb, "before"):
-            cb.before(name)
-        if httpio.active():
-            before = httpio.hits()
+        chamber, payload, before = _enter(fn, name, cb, args, kwargs)
+        if before is not None:
             try:
                 with httpio.using_tool(name):
                     out = fn(*args, **kwargs)
-            except Exception:
-                if httpio.hits() > before:
-                    raise
+            except Exception as e:
+                _body_raised(chamber, name, before, e)
             else:
-                if httpio.hits() > before:
-                    return out if out is not None else present(httpio.last_result() or {})
-        res = cb.tool(name, payload) if hasattr(cb, "tool") else {}
-        _emit_evidence(cb, name, res)
-        return present(res)
+                handled, value = _body_answered(before, out)
+                if handled:
+                    return value
+        return _chamber_answer(chamber, name, payload)
 
-    wrapped._crucible_wrapped = True  # type: ignore[attr-defined]
-    wrapped._crucible_name = name  # type: ignore[attr-defined]
-    wrapped.__name__ = getattr(fn, "__name__", name)
-    wrapped.__doc__ = getattr(fn, "__doc__", "") or ""
-    return wrapped
+    return _mark(wrapped, fn, name)
+
+
+def wrap_coroutine(fn, name: str, cb=None):
+    """The async twin of wrap_callable: same policy, one await."""
+    if fn is None or getattr(fn, "_crucible_wrapped", False):
+        return fn
+
+    async def wrapped(*args, **kwargs):
+        from . import httpio
+
+        chamber, payload, before = _enter(fn, name, cb, args, kwargs)
+        if before is not None:
+            try:
+                with httpio.using_tool(name):
+                    out = await fn(*args, **kwargs)
+            except Exception as e:
+                _body_raised(chamber, name, before, e)
+            else:
+                handled, value = _body_answered(before, out)
+                if handled:
+                    return value
+        return _chamber_answer(chamber, name, payload)
+
+    return _mark(wrapped, fn, name)
 
 
 def wrap_tool(obj: Any, cb, name: str | None = None) -> Any:
@@ -160,13 +254,7 @@ def wrap_tool(obj: Any, cb, name: str | None = None) -> Any:
             obj.func = wrap_callable(fn, name, cb)
         coro = getattr(obj, "coroutine", None)
         if callable(coro) and not getattr(coro, "_crucible_wrapped", False):
-            sync = wrap_callable(coro, name, cb)
-
-            async def acoro(*a, **k):
-                return sync(*a, **k)
-
-            acoro._crucible_wrapped = True  # type: ignore[attr-defined]
-            obj.coroutine = acoro
+            obj.coroutine = wrap_callable(coro, name, cb)
         return obj
     if callable(obj):
         return wrap_callable(obj, name, cb)
@@ -245,7 +333,17 @@ def wrap_module(mod, cb, spec: dict | None = None) -> list[str]:
                     wrapped.append(k)
         elif isinstance(obj, list):
             for i, v in enumerate(obj):
-                wrap_tool(v, cb, getattr(v, "name", None))
+                if v is None or getattr(v, "_crucible_wrapped", False):
+                    continue
+                tname = getattr(v, "name", None) or getattr(v, "__name__", None)
+                # Assign the result back. wrap_tool patches a tool object in
+                # place and returns it, but for a plain function it returns a new
+                # wrapper, and dropping that left the list holding the unwrapped
+                # body: an agent exporting `tools = [search, update]` ran
+                # unintercepted.
+                obj[i] = wrap_tool(v, cb, tname)
+                if tname and tname not in wrapped:
+                    wrapped.append(tname)
     return wrapped
 
 

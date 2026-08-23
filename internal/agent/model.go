@@ -55,23 +55,28 @@ type HTTPModel struct {
 	Client  *http.Client
 }
 
+// ModelFromEnv returns a live planner when the environment names one, and the
+// scripted planner otherwise. Note that a live model breaks replay: the chamber
+// wires ScriptedModel in by default for exactly that reason.
 func ModelFromEnv() Model {
-	if strings.TrimSpace(os.Getenv("CRUCIBLE_AGENT_MODEL")) == "" &&
-		strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) == "" {
-		return ScriptedModel{}
-	}
-	if os.Getenv("CRUCIBLE_AGENT_MODEL") == "scripted" {
+	if strings.TrimSpace(os.Getenv("CRUCIBLE_AGENT_MODEL")) == "scripted" {
 		return ScriptedModel{}
 	}
 	key := firstEnv("CRUCIBLE_AI_API_KEY", "OPENAI_API_KEY")
 	if key == "" {
 		return ScriptedModel{}
 	}
-	return HTTPModel{
-		BaseURL: firstEnv("CRUCIBLE_AI_BASE_URL", "https://api.openai.com/v1"),
-		APIKey:  key,
-		Model:   firstEnv("CRUCIBLE_AI_MODEL", "gpt-4o-mini"),
+	// firstEnv takes variable names. Passing a default as a second name looked
+	// up a variable called "https://api.openai.com/v1" and left the field empty.
+	base := firstEnv("CRUCIBLE_AI_BASE_URL")
+	if base == "" {
+		base = "https://api.openai.com/v1"
 	}
+	model := firstEnv("CRUCIBLE_AGENT_MODEL", "CRUCIBLE_AI_MODEL")
+	if model == "" {
+		model = "gpt-4o-mini"
+	}
+	return HTTPModel{BaseURL: base, APIKey: key, Model: model}
 }
 
 func (m HTTPModel) Complete(ctx context.Context, req ModelReq) (ModelResp, error) {

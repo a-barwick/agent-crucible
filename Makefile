@@ -14,12 +14,13 @@ runtime:
 test:
 	go test ./...
 	PYTHONPATH=runtime python3 -m crucible_rt smoke
+	node runtime/js/selftest.mjs
 
 build:
 	go build -o $(BIN) ./cmd/crucible
 
 serve: build
-	./$(BIN) serve -addr :8080
+	./$(BIN) serve -addr 127.0.0.1:8080
 
 run: build
 	./$(BIN) run -seed 42 -trials 40 -p 0.3

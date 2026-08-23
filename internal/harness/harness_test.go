@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -53,13 +54,20 @@ func TestCollapseAtThirty(t *testing.T) {
 	}
 }
 
+// The demo ensemble is pinned so that a change in the injector, the judge or
+// the sample agent cannot quietly move the numbers on the front page. These
+// values are not meaningful on their own; when a deliberate change moves them,
+// re-pin them and say so in the commit.
 func TestDemoSeed42Locked(t *testing.T) {
 	s := Run(context.Background(), Config{Seed: 42, Trials: 40, P: 0.30, Faults: fault.MVP})
-	if s.Survival != 0.35 {
-		t.Fatalf("demo survival drifted: got %v want 0.35 counts=%v", s.Survival, s.Counts)
+	if s.Survival != 0.30 {
+		t.Fatalf("demo survival drifted: got %v want 0.30 counts=%v", s.Survival, s.Counts)
 	}
-	if s.Counts["completed"] != 4 || s.Counts["recovered"] != 10 {
+	if s.Counts["completed"] != 6 || s.Counts["recovered"] != 6 {
 		t.Fatalf("demo mix drifted: %v", s.Counts)
+	}
+	if s.Errored != 0 {
+		t.Fatalf("the in-process demo should never need infrastructure: %d errored (%s)", s.Errored, s.Error)
 	}
 }
 
@@ -80,6 +88,122 @@ func TestSweepMonotonicSurvival(t *testing.T) {
 	}
 }
 
+// Raising p on a fixed seed must not reshuffle the ensemble. Each decision site
+// draws from its own sub-stream keyed by (site, target, visit), so any site both
+// runs reach sees the same die roll and the same candidate fault; only the
+// verdict on that roll changes, and it changes in one direction.
+//
+// Which faults you *observe* is inevitably path-dependent — a 403 at authorize
+// means the write node never runs, and a site that is never reached cannot
+// fire. So the invariant is asserted where it is exact: on the decisions
+// themselves. With a single shared stream this fails on the first trial where
+// a fault adds a retry, because every later draw shifts by one.
+func TestDecisionsAreStableAsPRises(t *testing.T) {
+	cfg := Config{Seed: 42, Trials: 24, Faults: fault.All}
+	ps := []float64{0, 0.1, 0.2, 0.4, 0.7, 1}
+	runs := make([]map[int]Trial, len(ps))
+	for i, p := range ps {
+		c := cfg
+		c.P = p
+		s := Run(context.Background(), c)
+		runs[i] = map[int]Trial{}
+		for _, tr := range s.Trials {
+			runs[i][tr.N] = tr
+		}
+	}
+	shared, vanished := 0, 0
+	for i := 1; i < len(ps); i++ {
+		for n, lo := range runs[i-1] {
+			hiTrial := runs[i][n]
+			hi := decisionsByKey(hiTrial)
+			loKeys, loOrder := decisionsByKey(lo), decisionOrder(lo)
+			for key, a := range loKeys {
+				b, ok := hi[key]
+				if !ok {
+					// The higher-p run never reached this site. That is only
+					// legitimate behind a fault that fired earlier and cut the
+					// run short — otherwise the ensemble reshuffled, which is
+					// what this test exists to catch.
+					if !firedBefore(hiTrial, loOrder[key]) {
+						t.Fatalf("trial %d site %s: reached at p=%v but not at p=%v, with no earlier fault to explain it (p=%v decisions %v)",
+							n, key, ps[i-1], ps[i], ps[i], decisionKeys(hiTrial))
+					}
+					vanished++
+					continue
+				}
+				shared++
+				if a.U != b.U || a.Type != b.Type {
+					t.Fatalf("trial %d site %s: draw changed with p (%v/%s at p=%v vs %v/%s at p=%v)",
+						n, key, a.U, a.Type, ps[i-1], b.U, b.Type, ps[i])
+				}
+				if a.Fired && !b.Fired {
+					t.Fatalf("trial %d site %s: fired at p=%v but not at p=%v (u=%v)",
+						n, key, ps[i-1], ps[i], a.U)
+				}
+			}
+		}
+	}
+	if shared == 0 {
+		t.Fatal("no sites were shared between runs; the test compared nothing")
+	}
+	t.Logf("compared %d shared sites; %d vanished behind an earlier fault", shared, vanished)
+}
+
+// firedBefore reports whether tr fired a fault at a decision index below idx.
+// That is the one thing allowed to make a site the lower-p run reached
+// unreachable: the run stopped before getting there.
+func firedBefore(tr Trial, idx int) bool {
+	for i, d := range tr.Decisions {
+		if i >= idx {
+			break
+		}
+		if d.Fired {
+			return true
+		}
+	}
+	// The arming of a cost ceiling is logged at preflight but only bites on a
+	// later call, so a run can end early with its only fired decision after the
+	// site that disappeared.
+	for _, d := range tr.Decisions {
+		if d.Fired && d.Type == fault.CostCeiling {
+			return true
+		}
+	}
+	return false
+}
+
+func decisionsByKey(tr Trial) map[string]fault.Decision {
+	out := map[string]fault.Decision{}
+	for _, d := range tr.Decisions {
+		out[decisionKey(d)] = d
+	}
+	return out
+}
+
+func decisionOrder(tr Trial) map[string]int {
+	out := map[string]int{}
+	for i, d := range tr.Decisions {
+		out[decisionKey(d)] = i
+	}
+	return out
+}
+
+func decisionKeys(tr Trial) []string {
+	out := make([]string, 0, len(tr.Decisions))
+	for _, d := range tr.Decisions {
+		mark := ""
+		if d.Fired {
+			mark = "!"
+		}
+		out = append(out, mark+decisionKey(d))
+	}
+	return out
+}
+
+func decisionKey(d fault.Decision) string {
+	return fmt.Sprintf("%s|%s|%d", d.Site, d.Target, d.Visit)
+}
+
 func TestSingleFaultMalformed(t *testing.T) {
 	s := Run(context.Background(), Config{
 		Seed: 1, Trials: 20, P: 1, Faults: []fault.Type{fault.Malformed},
@@ -95,6 +219,36 @@ func TestSingleFaultMalformed(t *testing.T) {
 	}
 	if !found && !contains(s.Critique.Headline, "missing fields") {
 		t.Fatalf("critique missed malformed architecture note: %+v", s.Critique)
+	}
+}
+
+// TestArmedCostBudgetIsWhatTheTimelineSays: the budget scales with the tool
+// surface, but the armed event logged the package default, so the timeline for a
+// two-tool agent claimed a ceiling of 3 while the run actually stopped at 1.
+func TestArmedCostBudgetIsWhatTheTimelineSays(t *testing.T) {
+	bundle := ticketBundle(1, 0, false) // two tools -> budget 1
+	s := Run(context.Background(), Config{
+		Seed: 5, Trials: 24, P: 1, Agent: "pasted", Bundle: &bundle,
+		Faults: []fault.Type{fault.CostCeiling},
+	})
+	want := costBudget(2)
+	if want == fault.DefaultCostBudget {
+		t.Fatalf("pick a tool surface whose budget differs from the default, got %d", want)
+	}
+	saw := 0
+	for _, tr := range s.Trials {
+		for _, ev := range tr.Events {
+			if ev.Message != "cost ceiling armed" {
+				continue
+			}
+			saw++
+			if got := ev.Data["budget"]; fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Fatalf("trial %d logged budget %v, armed %v", tr.N, got, want)
+			}
+		}
+	}
+	if saw == 0 {
+		t.Fatal("no cost ceiling was armed at p=1")
 	}
 }
 
